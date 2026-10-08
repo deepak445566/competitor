@@ -9,7 +9,21 @@ export interface FetchResult {
   /** Present only for successful HTML responses. */
   html: string | null;
   error: string | null;
+  /** From a Retry-After header on 429/503, capped at 60s. */
+  retryAfterMs?: number;
 }
+
+/** Retry-After is either seconds or an HTTP date. */
+function parseRetryAfter(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(ms) && ms > 0 ? Math.min(ms, 60_000) : undefined;
+}
+
+/** Interstitial "checking your browser" pages (Cloudflare, Sucuri, DDoS-Guard…). */
+const BOT_CHECK_TITLE = /just a moment|attention required|checking your browser|please wait|ddos-guard|security check/i;
+const BOT_CHECK_STATUS = new Set([403, 429, 503]);
 
 export interface Fetcher {
   engine: "playwright" | "fetch";
@@ -47,6 +61,7 @@ export function createHttpFetcher(): Fetcher {
           finalUrl: res.url || url,
           html: ok ? await res.text() : null,
           error: ok ? null : res.status >= 400 ? `HTTP ${res.status}` : "Not an HTML page",
+          retryAfterMs: parseRetryAfter(res.headers.get("retry-after")),
         };
       } catch (err) {
         return { status: 0, finalUrl: url, html: null, error: message(err) };
@@ -95,8 +110,29 @@ export async function createPlaywrightFetcher(): Promise<Fetcher> {
     try {
       const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: config.crawlTimeoutMs });
       if (!response) return { status: 0, finalUrl: url, html: null, error: "No response" };
-      const status = response.status();
-      if (status >= 400) return { status, finalUrl: page.url(), html: null, error: `HTTP ${status}` };
+      let status = response.status();
+      if (BOT_CHECK_STATUS.has(status) && BOT_CHECK_TITLE.test(await page.title().catch(() => ""))) {
+        // A "checking your browser" interstitial: let the browser finish it, as a normal visitor's would.
+        // (No CAPTCHA solving — if it needs a human, the page stays blocked.)
+        const passed = await page
+          .waitForFunction((re) => !new RegExp(re, "i").test(document.title), BOT_CHECK_TITLE.source, {
+            timeout: 20_000,
+          })
+          .then(() => true, () => false);
+        if (passed) {
+          await page.waitForLoadState("domcontentloaded").catch(() => {});
+          status = 200;
+        }
+      }
+      if (status >= 400) {
+        return {
+          status,
+          finalUrl: page.url(),
+          html: null,
+          error: `HTTP ${status}${BOT_CHECK_STATUS.has(status) ? " (blocked or rate-limited)" : ""}`,
+          retryAfterMs: parseRetryAfter(response.headers()["retry-after"]),
+        };
+      }
       if (!isHtml(response.headers()["content-type"])) {
         return { status, finalUrl: page.url(), html: null, error: "Not an HTML page" };
       }

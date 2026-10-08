@@ -11,6 +11,8 @@ export type TextFallback = (url: string) => Promise<TextResult>;
 
 const MAX_SITEMAP_FILES = 50;
 export const MAX_SITEMAP_URLS = 10_000;
+/** Child sitemaps listing archives rather than content. */
+const TAXONOMY_SITEMAP = /(?:tag|category|categories|author|attachment|archive|format|taxonomy)[-_]?sitemap|sitemap[-_]?(?:tag|category|categories|author|attachment|archive)/i;
 
 export interface RobotsRules {
   found: boolean;
@@ -91,10 +93,18 @@ export async function discover(siteUrl: string, fallback?: TextFallback): Promis
     readSitemaps.push(sitemapUrl);
 
     const $ = cheerio.load(res.body, { xml: true });
-    $("sitemapindex > sitemap > loc").each((_, el) => {
-      const loc = $(el).text().trim();
-      if (loc && !seenSitemaps.has(loc)) queue.push(loc);
-    });
+    // Big sites hit MAX_SITEMAP_URLS before reading every child sitemap, so read the most recently
+    // updated ones first and taxonomy/archive sitemaps (tags, authors…) last.
+    const children = $("sitemapindex > sitemap")
+      .map((_, el) => ({
+        loc: $(el).children("loc").first().text().trim(),
+        at: Date.parse($(el).children("lastmod").first().text().trim()) || 0,
+        archive: TAXONOMY_SITEMAP.test($(el).children("loc").first().text()),
+      }))
+      .get()
+      .filter((c) => c.loc && !seenSitemaps.has(c.loc))
+      .sort((a, b) => Number(a.archive) - Number(b.archive) || b.at - a.at);
+    queue.push(...children.map((c) => c.loc));
     $("urlset > url").each((_, el) => {
       if (pages.size >= MAX_SITEMAP_URLS) return false;
       const url = normalizeUrl($(el).children("loc").first().text());

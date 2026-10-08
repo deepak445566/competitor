@@ -44,11 +44,18 @@ export function isSameSite(url: string, rootHost: string): boolean {
   }
 }
 
-/** Looks like an HTML page we should load (not an asset/download). */
+// System/utility URLs that aren't real content: API & feed endpoints, accounts/cart, archive
+// listings and their pagination, page-builder template posts. Crawling them wastes the page limit.
+const SKIP_PATHS =
+  /\/(?:wp-json|wp-admin|feed|cdn-cgi|tag|author|cart|checkout|my-account|account|login|signin|sign-in|signup|sign-up|logout|register|wishlist)(?:\/|$)|\/page\/\d+\/?$|\/wp-login\.php$/i;
+const SKIP_QUERY =
+  /(?:^|&)(?:oceanwp_library|elementor_library|et_pb_layout|fl-builder-template|replytocom|add-to-cart|add_to_wishlist|orderby|share|amp|preview|s|p|page_id|attachment_id)=/i;
+
+/** Looks like an HTML content page we should load (not an asset, download or system URL). */
 export function isCrawlableUrl(url: string): boolean {
   try {
-    const { pathname } = new URL(url);
-    return !SKIP_EXTENSIONS.test(pathname) && !/\/(?:wp-json|feed|cdn-cgi)(?:\/|$)/i.test(pathname);
+    const { pathname, search } = new URL(url);
+    return !SKIP_EXTENSIONS.test(pathname) && !SKIP_PATHS.test(pathname) && !SKIP_QUERY.test(search.slice(1));
   } catch {
     return false;
   }
