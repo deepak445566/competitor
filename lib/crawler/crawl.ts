@@ -8,7 +8,6 @@ import { isCrawlableUrl, isSameSite, normalizeUrl } from "./url";
 
 /** Previously-known URLs that vanished from discovery get re-fetched (up to this many) to confirm deletion. */
 const MAX_VERIFY = 25;
-const CRAWL_DEADLINE_MS = 20 * 60 * 1000;
 /** Sitemap URLs modified within this many days are crawled before older ones. */
 const RECENT_PRIORITY_DAYS = 30;
 
@@ -114,7 +113,7 @@ export async function crawlSite(
   [home, ...fresh, ...recentlyModified, ...prevCrawled, ...byNewest(discovery.pageUrls)].forEach(enqueue);
 
   const pages: CrawledPage[] = [];
-  const deadline = Date.now() + CRAWL_DEADLINE_MS;
+  const deadline = Date.now() + config.crawlTimeLimitMs;
 
   const crawlOne = async (url: string, followLinks: boolean) => {
     const res = await fetcher.fetchPage(url);

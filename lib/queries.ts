@@ -5,6 +5,7 @@ import { requireAdmin } from "./auth/dal";
 import { classifyByUrl } from "./crawler/extract";
 import { connectDB } from "./db";
 import { startOfToday } from "./format";
+import { recoverInterruptedChecks } from "./monitor";
 import {
   CHANGE_TYPES,
   Change,
@@ -48,6 +49,7 @@ async function attachNames(changes: ChangeDoc[]): Promise<ChangeWithCompetitor[]
 
 export async function getDashboardData() {
   await ready();
+  await recoverInterruptedChecks(); // clears checks a killed process left as "Checking…"
   const today = startOfToday();
   const weekAgo = new Date(Date.now() - 7 * 86400_000);
 
@@ -76,6 +78,7 @@ export async function getDashboardData() {
 
 export async function getCompetitors() {
   await ready();
+  await recoverInterruptedChecks();
   const weekAgo = new Date(Date.now() - 7 * 86400_000);
   const [competitors, weekly] = await Promise.all([
     Competitor.find().sort({ createdAt: -1 }).lean<CompetitorDoc[]>(),
@@ -191,6 +194,7 @@ async function getTopicReport(
 export async function getCompetitorDetail(id: string, filter: { type?: string; page?: number; recent?: number }) {
   await ready();
   if (!Types.ObjectId.isValid(id)) return null;
+  await recoverInterruptedChecks();
   const competitor = await Competitor.findById(id).lean<CompetitorDoc>();
   if (!competitor) return null;
 

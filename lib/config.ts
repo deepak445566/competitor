@@ -17,6 +17,11 @@ export const config = {
   crawlConcurrency: int(process.env.CRAWL_CONCURRENCY, 3, 1),
   /** Per-page navigation timeout. */
   crawlTimeoutMs: int(process.env.CRAWL_TIMEOUT_MS, 30_000, 1000),
+  /**
+   * Hard stop for one whole crawl; pages fetched so far are still saved and compared.
+   * Shorter on Vercel, where a function is killed at maxDuration (300s) — stop early and save instead.
+   */
+  crawlTimeLimitMs: int(process.env.CRAWL_TIME_LIMIT_SECONDS, process.env.VERCEL ? 240 : 1200, 30) * 1000,
   crawlerEngine: (process.env.CRAWLER_ENGINE === "fetch" ? "fetch" : "playwright") as
     | "playwright"
     | "fetch",

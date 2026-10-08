@@ -9,6 +9,9 @@ import { displayUrl, formatDate, formatDateTime, timeAgo } from "@/lib/format";
 import { RECENT_WINDOWS, getCompetitorDetail, type RecentUpdate } from "@/lib/queries";
 import type { Term, TopicReport } from "@/lib/topics";
 
+// Server Actions on this page start checks; on serverless hosts they may run up to this many seconds.
+export const maxDuration = 300;
+
 export default function CompetitorPage(props: PageProps<"/competitors/[id]">) {
   return (
     <Suspense

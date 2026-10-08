@@ -6,6 +6,9 @@ import { Card, CardHeader, EmptyState, PageHeader, Skeleton, StatCard, StatusBad
 import { timeAgo } from "@/lib/format";
 import { getDashboardData } from "@/lib/queries";
 
+// Server Actions on this page start checks; on serverless hosts they may run up to this many seconds.
+export const maxDuration = 300;
+
 export default function DashboardPage() {
   return (
     <>

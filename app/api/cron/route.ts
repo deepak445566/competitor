@@ -1,11 +1,14 @@
 import { timingSafeEqual } from "node:crypto";
-import { connection } from "next/server";
+import { after, connection } from "next/server";
 import { config } from "@/lib/config";
 import { runDueChecks } from "@/lib/monitor";
 
+/** Seconds this function may run on serverless hosts (Vercel Hobby max with Fluid compute). */
+export const maxDuration = 300;
+
 /**
- * Optional external trigger (e.g. system cron / Task Scheduler) for hosts where
- * the in-process scheduler isn't reliable:
+ * External trigger for hosts where the in-process scheduler can't run (e.g. Vercel Cron,
+ * which sends "Authorization: Bearer $CRON_SECRET" automatically), or system cron:
  *   curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron
  */
 export async function GET(request: Request) {
@@ -18,7 +21,7 @@ export async function GET(request: Request) {
     timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
   if (!ok) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Checks can take minutes; run them in the background and answer right away.
-  void runDueChecks().catch((err) => console.error("[cron]", err));
+  // Checks can take minutes: answer right away, keep the function alive until they finish.
+  after(() => runDueChecks().catch((err) => console.error("[cron]", err)));
   return Response.json({ started: true });
 }

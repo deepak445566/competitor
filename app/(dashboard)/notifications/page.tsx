@@ -8,6 +8,9 @@ import { displayUrl, formatDateTime, timeAgo } from "@/lib/format";
 import { emailConfigured } from "@/lib/notify";
 import { getNotifications } from "@/lib/queries";
 
+// Server Actions on this page start checks; on serverless hosts they may run up to this many seconds.
+export const maxDuration = 300;
+
 export const metadata: Metadata = { title: "Notifications" };
 
 export default function NotificationsPage() {

@@ -3,6 +3,7 @@
 import { cookies } from "next/headers";
 import { refresh } from "next/cache";
 import { redirect } from "next/navigation";
+import { after } from "next/server";
 import { Types } from "mongoose";
 import { requireAdmin } from "@/lib/auth/dal";
 import {
@@ -14,11 +15,19 @@ import {
 import { config } from "@/lib/config";
 import { parseSiteUrl, siteHost } from "@/lib/crawler/url";
 import { connectDB } from "@/lib/db";
-import { Change, Competitor, Notification, Page, Snapshot } from "@/lib/models";
+import { Change, Competitor, FeedItem, Notification, Page, Snapshot } from "@/lib/models";
 import { startCheck } from "@/lib/monitor";
 import { runUploadWatch } from "@/lib/scheduler";
 
 // React resets a form after its action runs; `fields` echoes input back so errors don't wipe it.
+/**
+ * Let background work finish after the response is sent. On a normal Node server it would anyway;
+ * on serverless hosts (Vercel) after() keeps the function alive until it does, up to maxDuration.
+ */
+function keepAlive(work: Promise<void> | null | undefined) {
+  if (work) after(() => work.catch((err) => console.error("[background]", err)));
+}
+
 export type FormState = { error?: string; ok?: string; fields?: Record<string, string> } | undefined;
 
 // ---------- Auth ----------
@@ -74,7 +83,7 @@ export async function addCompetitorAction(_prev: FormState, formData: FormData):
 
   const competitor = await Competitor.create({ name, url: url.toString(), host, maxPages: maxPagesRaw });
   // First check runs right away and becomes the baseline snapshot.
-  await startCheck(String(competitor._id));
+  keepAlive((await startCheck(String(competitor._id)))?.run);
   refresh();
   return { ok: `${name} added. Capturing the first snapshot…` };
 }
@@ -89,6 +98,7 @@ export async function deleteCompetitorAction(formData: FormData) {
     Change.deleteMany({ competitorId: id }),
     Snapshot.deleteMany({ competitorId: id }),
     Notification.deleteMany({ competitorId: id }),
+    FeedItem.deleteMany({ competitorId: id }),
   ]);
   await Competitor.deleteOne({ _id: id });
   if (formData.get("redirectTo") === "/competitors") redirect("/competitors");
@@ -97,7 +107,7 @@ export async function deleteCompetitorAction(formData: FormData) {
 
 export async function checkNowAction(formData: FormData) {
   await requireAdmin();
-  await startCheck(String(formData.get("id") ?? ""));
+  keepAlive((await startCheck(String(formData.get("id") ?? "")))?.run);
   refresh();
 }
 
@@ -113,6 +123,6 @@ export async function markAllReadAction() {
 /** Run the new-upload watch (RSS feeds + sitemap) right away; it normally runs every WATCH_INTERVAL_MINUTES. */
 export async function watchNowAction() {
   await requireAdmin();
-  void runUploadWatch().catch((err) => console.error("[watch]", err));
+  keepAlive(runUploadWatch().then(() => {}));
   refresh();
 }

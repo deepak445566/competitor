@@ -11,10 +11,14 @@ import { notifyBaseline, notifyChanges, notifyFailure } from "./notify";
 const hasContent = (p: { statusCode: number; contentHash?: string }) =>
   p.statusCode > 0 && p.statusCode < 400 && !!p.contentHash;
 
-/** Atomically mark a competitor as crawling. Returns null if a check is already running. */
+/** A check still "running" after the crawl time limit + 5 min was killed (restart, hosting timeout). */
+const staleCutoff = () => new Date(Date.now() - config.crawlTimeLimitMs - 5 * 60_000);
+
+/** Atomically mark a competitor as crawling. Returns null if a (live) check is already running. */
 async function claim(competitorId: string): Promise<CompetitorDoc | null> {
   await connectDB();
   if (!Types.ObjectId.isValid(competitorId)) return null;
+  await recoverInterruptedChecks(); // frees competitors stuck on a killed check
   return Competitor.findOneAndUpdate(
     { _id: competitorId, status: { $ne: "crawling" } },
     { $set: { status: "crawling", lastError: null } },
@@ -22,12 +26,15 @@ async function claim(competitorId: string): Promise<CompetitorDoc | null> {
   ).lean<CompetitorDoc>();
 }
 
-/** "Check Now": start a check in the background and return immediately. */
-export async function startCheck(competitorId: string): Promise<boolean> {
+/**
+ * "Check Now": claim the competitor and start the check without waiting for it.
+ * Returns the running check (or null if one is already running) so the caller can keep
+ * a serverless function alive until it finishes, via `after(() => started.run)`.
+ * Wrapped in an object: returning the promise itself would make `await startCheck()` wait for the whole crawl.
+ */
+export async function startCheck(competitorId: string): Promise<{ run: Promise<void> } | null> {
   const competitor = await claim(competitorId);
-  if (!competitor) return false;
-  void runCheck(competitor);
-  return true;
+  return competitor ? { run: runCheck(competitor) } : null;
 }
 
 /** Old snapshot → new crawl → compare → save changes → notify. Never throws. */
@@ -200,9 +207,18 @@ export async function runDueChecks(): Promise<number> {
 /** After a restart, checks that were mid-crawl can never finish; mark them failed. */
 export async function recoverInterruptedChecks(): Promise<void> {
   await connectDB();
-  const message = "Interrupted (server restarted). Click Check Now to retry.";
-  const stale = await Snapshot.find({ status: "running" }).select("_id").lean();
-  await Page.deleteMany({ snapshotId: { $in: stale.map((s) => s._id) } });
-  await Snapshot.updateMany({ status: "running" }, { $set: { status: "failed", finishedAt: new Date(), error: message } });
-  await Competitor.updateMany({ status: "crawling" }, { $set: { status: "error", lastError: message } });
+  // Only checks older than the crawl time limit: a fresh one may be running in another
+  // process (e.g. another serverless instance) and must not be failed.
+  const cutoff = staleCutoff();
+  const message = "Check was interrupted (server restart or hosting time limit). Click Check Now to retry.";
+  const stale = await Snapshot.find({ status: "running", startedAt: { $lt: cutoff } }).select("_id").lean();
+  if (stale.length) {
+    const ids = stale.map((s) => s._id);
+    await Page.deleteMany({ snapshotId: { $in: ids } });
+    await Snapshot.updateMany({ _id: { $in: ids } }, { $set: { status: "failed", finishedAt: new Date(), error: message } });
+  }
+  await Competitor.updateMany(
+    { status: "crawling", updatedAt: { $lt: cutoff } },
+    { $set: { status: "error", lastError: message } },
+  );
 }

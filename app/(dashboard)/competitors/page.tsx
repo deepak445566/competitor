@@ -7,6 +7,9 @@ import { config } from "@/lib/config";
 import { formatDateTime, timeAgo } from "@/lib/format";
 import { getCompetitors } from "@/lib/queries";
 
+// Server Actions on this page start checks; on serverless hosts they may run up to this many seconds.
+export const maxDuration = 300;
+
 export const metadata: Metadata = { title: "Competitors" };
 
 export default function CompetitorsPage() {
