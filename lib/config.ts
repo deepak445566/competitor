@@ -3,7 +3,12 @@ function int(value: string | undefined, fallback: number, min = 0): number {
   return Number.isFinite(n) && n >= min ? n : fallback;
 }
 
+/** Vercel and similar: each request is a function killed after maxDuration (300s), with no browser installed. */
+const serverless = !!process.env.VERCEL;
+
 export const config = {
+  serverless,
+
   mongodbUri:
     process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/competitor-monitor",
 
@@ -11,8 +16,12 @@ export const config = {
   adminPassword: process.env.ADMIN_PASSWORD ?? "",
   sessionSecret: process.env.SESSION_SECRET ?? "",
 
-  /** Full checks running at the same time in this server; the rest wait their turn. */
-  maxConcurrentChecks: int(process.env.MAX_CONCURRENT_CHECKS, 2, 1),
+  /**
+   * Full checks running at the same time in this server; the rest wait their turn.
+   * Higher on serverless: there is no browser to overload (plain HTTP only), and a check
+   * waiting in line still burns its function's 300s, so a long queue gets checks killed.
+   */
+  maxConcurrentChecks: int(process.env.MAX_CONCURRENT_CHECKS, serverless ? 20 : 2, 1),
   /** Max pages crawled per competitor per check. */
   crawlMaxPages: int(process.env.CRAWL_MAX_PAGES, 50, 1),
   /** Parallel page loads per crawl (forced to 1 when robots.txt sets Crawl-delay). */
@@ -22,8 +31,10 @@ export const config = {
   /**
    * Hard stop for one whole crawl; pages fetched so far are still saved and compared.
    * Shorter on Vercel, where a function is killed at maxDuration (300s) — stop early and save instead.
+   * There it counts from the moment the check starts (time waiting in line and reading sitemaps
+   * included), leaving room for the last page load and for saving before the function is killed.
    */
-  crawlTimeLimitMs: int(process.env.CRAWL_TIME_LIMIT_SECONDS, process.env.VERCEL ? 240 : 1200, 30) * 1000,
+  crawlTimeLimitMs: int(process.env.CRAWL_TIME_LIMIT_SECONDS, serverless ? 220 : 1200, 30) * 1000,
   crawlerEngine: (process.env.CRAWLER_ENGINE === "fetch" ? "fetch" : "playwright") as
     | "playwright"
     | "fetch",

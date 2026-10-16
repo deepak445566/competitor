@@ -20,6 +20,15 @@ const HEARTBEAT_MS = 30_000;
 const STALE_MS = 3 * 60_000;
 const staleCutoff = () => new Date(Date.now() - STALE_MS);
 
+/** Interrupted checks retry by themselves on the next scheduled run, at most this often. */
+const RETRY_AFTER_MS = 15 * 60_000;
+const INTERRUPTED = "Check was interrupted";
+const interruptedMessage = (why: string) => `${INTERRUPTED} (${why}). It will retry automatically, or click Check Now.`;
+/** Less time than this left after waiting in line: don't start a crawl that the host would kill midway. */
+const MIN_CRAWL_MS = 45_000;
+/** Homepage errors that mean bot protection is refusing us, not that the site is down. */
+const BLOCKED_HINT = /timeout|aborted|ERR_HTTP2_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_EMPTY_RESPONSE|HTTP 403|HTTP 429/i;
+
 // In-process queue: at most MAX_CONCURRENT_CHECKS crawls at once, so many "Check now" clicks
 // don't start a browser each and overload the machine. Shared across hot reloads.
 const slots = globalThis as unknown as { __cmCheckSlots?: { running: number; waiting: (() => void)[] } };
@@ -73,8 +82,14 @@ async function runCheck(competitor: CompetitorDoc): Promise<void> {
   heartbeat.unref();
   await acquireSlot(); // waits here while other checks run; the heartbeat keeps it "alive"
   const crawlStarted = Date.now();
+  // Serverless: the host kills the function a fixed time after the request started, waiting included.
+  const deadline = (config.serverless ? started : crawlStarted) + config.crawlTimeLimitMs;
 
   try {
+    if (deadline - Date.now() < MIN_CRAWL_MS) {
+      throw new Error(interruptedMessage("too many checks were running at once"));
+    }
+
     const prev = await Snapshot.findOne({
       competitorId: competitor._id,
       status: "completed",
@@ -95,6 +110,7 @@ async function runCheck(competitor: CompetitorDoc): Promise<void> {
             crawledUrls: prevPages.filter(hasContent).map((p) => p.url),
           }
         : null,
+      deadline,
       (crawled) => {
         if (crawled - lastProgress >= 5) {
           lastProgress = crawled;
@@ -112,9 +128,11 @@ async function runCheck(competitor: CompetitorDoc): Promise<void> {
     const okPages = result.pages.filter(hasContent);
     if (okPages.length === 0) {
       const home = result.pages[0];
-      throw new Error(
-        `Could not load any page${home ? ` (homepage: ${home.error ?? `HTTP ${home.statusCode}`})` : ""}`,
-      );
+      const detail = home ? (home.error ?? `HTTP ${home.statusCode}`) : "";
+      const hint = BLOCKED_HINT.test(detail)
+        ? " The site's bot protection is refusing automated checks from this server."
+        : "";
+      throw new Error(`Could not load any page${detail ? ` (homepage: ${detail})` : ""}.${hint}`);
     }
 
     await Page.insertMany(
@@ -216,17 +234,36 @@ async function pruneOldSnapshots(competitorId: Types.ObjectId) {
   await Snapshot.updateMany({ _id: { $in: ids } }, { $set: { discoveredUrls: [], lastmods: [] } });
 }
 
-/** Run checks for competitors whose last check is older than CHECK_INTERVAL_HOURS, one at a time. */
+/**
+ * Run checks for competitors whose last check is older than CHECK_INTERVAL_HOURS, plus interrupted
+ * checks (retried after RETRY_AFTER_MS). One at a time on a server; on serverless one function call
+ * lasts at most 300s, so a batch runs side by side instead and the rest wait for the next call.
+ */
 export async function runDueChecks(): Promise<number> {
   if (config.checkIntervalHours <= 0) return 0;
   await connectDB();
+  await recoverInterruptedChecks();
   const cutoff = new Date(Date.now() - config.checkIntervalHours * 3600_000);
+  const retryCutoff = new Date(Date.now() - RETRY_AFTER_MS);
   const due = await Competitor.find({
     status: { $ne: "crawling" },
-    $or: [{ lastCheckedAt: null }, { lastCheckedAt: { $exists: false } }, { lastCheckedAt: { $lt: cutoff } }],
+    $or: [
+      { lastCheckedAt: null },
+      { lastCheckedAt: { $exists: false } },
+      { lastCheckedAt: { $lt: cutoff } },
+      { status: "error", lastError: { $regex: `^${INTERRUPTED}` }, lastCheckedAt: { $lt: retryCutoff } },
+    ],
   })
+    .sort({ lastCheckedAt: 1 })
     .select("_id")
     .lean();
+
+  if (config.serverless) {
+    const claimed = await Promise.all(due.slice(0, config.maxConcurrentChecks).map(({ _id }) => claim(String(_id))));
+    const batch = claimed.filter((c): c is CompetitorDoc => c !== null);
+    await Promise.all(batch.map(runCheck));
+    return batch.length;
+  }
 
   let ran = 0;
   for (const { _id } of due) {
@@ -244,7 +281,7 @@ export async function recoverInterruptedChecks(): Promise<void> {
   // Only checks whose heartbeat stopped: a live one may be running in another process
   // (another serverless instance, or a local server sharing the database) and must not be failed.
   const cutoff = staleCutoff();
-  const message = "Check was interrupted (server restart or hosting time limit). Click Check Now to retry.";
+  const message = interruptedMessage("server restart or hosting time limit");
   const stale = await Snapshot.find({
     status: "running",
     // Snapshots from older versions have no heartbeat: fall back to their start time.
@@ -261,6 +298,6 @@ export async function recoverInterruptedChecks(): Promise<void> {
   const alive = await Snapshot.distinct("competitorId", { status: "running" });
   await Competitor.updateMany(
     { status: "crawling", _id: { $nin: alive }, updatedAt: { $lt: cutoff } },
-    { $set: { status: "error", lastError: message } },
+    { $set: { status: "error", lastError: message, lastCheckedAt: new Date() } },
   );
 }

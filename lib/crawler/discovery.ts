@@ -73,7 +73,8 @@ export async function loadRobots(origin: string, fallback?: TextFallback): Promi
   };
 }
 
-export async function discover(siteUrl: string, fallback?: TextFallback): Promise<DiscoveryResult> {
+/** `stopAt`: stop reading more sitemap files after this time (ms epoch), keeping the URLs found so far. */
+export async function discover(siteUrl: string, fallback?: TextFallback, stopAt = Infinity): Promise<DiscoveryResult> {
   const root = new URL(siteUrl);
   const robots = await loadRobots(root.origin, fallback);
 
@@ -83,7 +84,12 @@ export async function discover(siteUrl: string, fallback?: TextFallback): Promis
   const pages = new Set<string>();
   const lastmod = new Map<string, string>();
 
-  while (queue.length && seenSitemaps.size < MAX_SITEMAP_FILES && pages.size < MAX_SITEMAP_URLS) {
+  while (
+    queue.length &&
+    seenSitemaps.size < MAX_SITEMAP_FILES &&
+    pages.size < MAX_SITEMAP_URLS &&
+    Date.now() < stopAt
+  ) {
     const sitemapUrl = queue.shift()!;
     if (seenSitemaps.has(sitemapUrl)) continue;
     seenSitemaps.add(sitemapUrl);

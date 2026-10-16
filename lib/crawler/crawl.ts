@@ -18,6 +18,8 @@ const isBlocked = (res: { status: number; error: string | null }) =>
   BLOCKED_STATUSES.has(res.status) || (res.status === 0 && BLOCKED_ERRORS.test(res.error ?? ""));
 const blockedLabel = (res: { status: number; error: string | null }) =>
   res.status ? `HTTP ${res.status}` : (res.error?.match(BLOCKED_ERRORS)?.[0] ?? "connection refused");
+/** Share of the time left that reading sitemaps may use, so big sitemaps can't eat the whole crawl. */
+const DISCOVERY_SHARE = 0.35;
 /** Pause between pages in slow mode (+ up to 2s random), and before retrying a blocked page. */
 const SLOW_DELAY_MS = 4000;
 const SLOW_RETRY_MS = 8000;
@@ -71,10 +73,12 @@ function dropGeneratedLastmods(entries: { url: string; at: Date }[]) {
   return entries.filter((e) => !generated.has(e.at.getTime()));
 }
 
+/** `deadline` (ms epoch): stop crawling then and return the pages fetched so far. */
 export async function crawlSite(
   siteUrl: string,
   maxPages: number,
   previous: PreviousCrawl | null,
+  deadline: number,
   onProgress?: (crawled: number) => void,
 ): Promise<CrawlResult> {
   const home = normalizeUrl(siteUrl)!;
@@ -85,7 +89,8 @@ export async function crawlSite(
   const warnings: string[] = [];
   let discovery;
   try {
-    discovery = await discover(home, (url) => fetcher.fetchText(url));
+    const discoveryStopAt = Date.now() + Math.max(0, deadline - Date.now()) * DISCOVERY_SHARE;
+    discovery = await discover(home, (url) => fetcher.fetchText(url), discoveryStopAt);
   } catch (err) {
     await fetcher.close();
     throw err;
@@ -129,7 +134,6 @@ export async function crawlSite(
   [home, ...fresh, ...recentlyModified, ...prevCrawled, ...byNewest(discovery.pageUrls)].forEach(enqueue);
 
   const pages: CrawledPage[] = [];
-  const deadline = Date.now() + config.crawlTimeLimitMs;
 
   // Slow mode: the first 403/429/503 means the site is limiting us. From then on crawl one page
   // at a time with a pause (like a person browsing), and retry each blocked page once after a wait.
