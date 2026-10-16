@@ -2,10 +2,14 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { ChangeList } from "@/components/change-list";
-import { AutoRefresh, CheckNowButton, DeleteCompetitorButton } from "@/components/client";
-import { Card, CardHeader, EmptyState, ErrorNote, PageHeader, Skeleton, StatCard, StatusBadge } from "@/components/ui";
+import { AutoRefresh, CheckNowButton } from "@/components/client";
+import { CompetitorMenu } from "@/components/competitor-directory";
+import { IconActivity, IconAlert, IconFile, IconLayers, IconTag } from "@/components/icons";
+import { Card, CardHeader, EmptyState, KpiCard, Skeleton } from "@/components/ui";
 import { CHANGE_META, CHANGE_ORDER } from "@/lib/change-meta";
+import { config } from "@/lib/config";
 import { displayUrl, formatDate, formatDateTime, timeAgo } from "@/lib/format";
+import type { ChangeType } from "@/lib/models";
 import { RECENT_WINDOWS, getCompetitorDetail, type RecentUpdate } from "@/lib/queries";
 import type { Term, TopicReport } from "@/lib/topics";
 
@@ -17,8 +21,13 @@ export default function CompetitorPage(props: PageProps<"/competitors/[id]">) {
     <Suspense
       fallback={
         <div className="space-y-6">
-          <Skeleton className="h-16" />
-          <Skeleton className="h-24" />
+          <Skeleton className="h-20" />
+          <Skeleton className="h-10 w-96" />
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            {Array.from({ length: 4 }, (_, i) => (
+              <Skeleton key={i} className="h-32" />
+            ))}
+          </div>
           <Skeleton className="h-96" />
         </div>
       }
@@ -29,6 +38,16 @@ export default function CompetitorPage(props: PageProps<"/competitors/[id]">) {
 }
 
 const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
+
+const TABS = [
+  { key: "overview", label: "Overview" },
+  { key: "changes", label: "Changes" },
+  { key: "pages", label: "Pages" },
+  { key: "checks", label: "Check history" },
+] as const;
+type Tab = (typeof TABS)[number]["key"];
+
+type Data = NonNullable<Awaited<ReturnType<typeof getCompetitorDetail>>>;
 
 async function CompetitorDetail({
   params,
@@ -46,211 +65,492 @@ async function CompetitorDetail({
   });
   if (!data) notFound();
 
-  const { now, competitor: c, running, latest, snapshots, countsByType, changes, type, page, totalPages, pages, recent, recentDays, topics } =
-    data;
+  const { now, competitor: c, group, running, latest, countsByType, type, page, recentDays, nextCheckAt } = data;
+  const groupHref = `/competitors?group=${group?.id ?? "none"}`;
+  // A change-type filter (e.g. from a dashboard link) opens the Changes tab.
+  const requested = first(sp.tab);
+  const tab: Tab = TABS.some((t) => t.key === requested) ? (requested as Tab) : type ? "changes" : "overview";
   const totalChanges = Object.values(countsByType).reduce((a, b) => a + (b ?? 0), 0);
-  const link = (params: { type?: string; page?: number; recent?: number }, anchor: string) => {
+
+  const link = (p: { tab?: Tab; type?: string; page?: number; recent?: number }) => {
     const q = new URLSearchParams();
-    if (params.type) q.set("type", params.type);
-    if (params.page && params.page > 1) q.set("page", String(params.page));
-    if (params.recent && params.recent !== 30) q.set("recent", String(params.recent));
+    if (p.tab && p.tab !== "overview") q.set("tab", p.tab);
+    if (p.type) q.set("type", p.type);
+    if (p.page && p.page > 1) q.set("page", String(p.page));
+    if (p.recent && p.recent !== 30) q.set("recent", String(p.recent));
     const s = q.toString();
-    return `/competitors/${id}${s ? `?${s}` : ""}#${anchor}`;
+    return `/competitors/${id}${s ? `?${s}` : ""}`;
   };
-  const href = (t?: string, p = 1) => link({ type: t, page: p, recent: recentDays }, "history");
-  const recentHref = (days: number) => link({ type, page, recent: days }, "recent");
+  const tabCounts: Partial<Record<Tab, number>> = {
+    changes: totalChanges,
+    pages: latest ? data.pages.length : undefined,
+  };
 
   return (
     <div className="space-y-6">
       <AutoRefresh active={c.status === "crawling"} />
-      <PageHeader
-        title={c.name}
-        subtitle={
-          <span className="flex flex-wrap items-center gap-2">
-            <a href={c.url} target="_blank" rel="noreferrer noopener" className="hover:underline">
-              {c.url}
-            </a>
-            <StatusBadge status={c.status} />
-          </span>
-        }
-        action={
-          <div className="flex gap-2">
-            <CheckNowButton id={id} disabled={c.status === "crawling"} />
-            <DeleteCompetitorButton id={id} name={c.name} redirectTo="/competitors" />
+
+      <nav aria-label="Breadcrumb" className="-mb-3 flex items-center gap-1.5 text-sm text-zinc-500">
+        <Link href="/competitors" className="hover:text-zinc-900 hover:underline dark:hover:text-zinc-100">
+          Competitors
+        </Link>
+        <span aria-hidden>/</span>
+        <Link href={groupHref} className="hover:text-zinc-900 hover:underline dark:hover:text-zinc-100">
+          {group?.name ?? "Without a parent"}
+        </Link>
+      </nav>
+
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-4">
+          <Avatar name={c.name} />
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="truncate text-2xl font-semibold tracking-tight">{c.name}</h1>
+              <StatusPill status={c.status} />
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm text-zinc-500">
+              <a href={c.url} target="_blank" rel="noreferrer noopener" className="hover:text-zinc-900 hover:underline dark:hover:text-zinc-100">
+                {c.host}
+              </a>
+              <span aria-hidden>·</span>
+              <span title={formatDateTime(c.lastCheckedAt)}>checked {timeAgo(c.lastCheckedAt, now)}</span>
+              {nextCheckAt && c.status !== "crawling" && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span title={formatDateTime(nextCheckAt)}>next {timeUntil(nextCheckAt, now)}</span>
+                </>
+              )}
+            </div>
           </div>
-        }
-      />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <CheckNowButton id={id} disabled={c.status === "crawling"} />
+          <CompetitorMenu id={id} name={c.name} url={c.url} maxPages={c.maxPages} redirectTo={groupHref} showOpen={false} />
+        </div>
+      </div>
 
       {running && (
-        <Card className="flex items-center gap-3 px-5 py-4 text-sm">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-sky-500" />
-          Check in progress — {running.pagesCrawled} pages crawled so far (started {timeAgo(running.startedAt, now)}).
+        <Card className="flex items-center gap-3 border-sky-200 bg-sky-50/60 px-5 py-3 text-sm dark:border-sky-900/60 dark:bg-sky-950/30">
+          <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-sky-500" />
+          <span>
+            Check in progress — <strong className="tabular-nums">{running.pagesCrawled}</strong> pages read so far (started{" "}
+            {timeAgo(running.startedAt, now)}). This page refreshes by itself.
+          </span>
         </Card>
       )}
-      {c.lastError && c.status !== "crawling" && (
-        <ErrorNote>
-          <strong>{c.status === "error" ? "Last check failed: " : "Note: "}</strong>
-          {c.lastError}
-        </ErrorNote>
-      )}
+      {c.lastError && c.status !== "crawling" && <Notice failed={c.status === "error"} message={c.lastError} />}
 
+      {/* Tabs */}
+      <nav aria-label="Sections" className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+        <div className="flex gap-1 border-b border-zinc-200 dark:border-zinc-800">
+          {TABS.map((t) => {
+            const active = tab === t.key;
+            return (
+              <Link
+                key={t.key}
+                href={link({ tab: t.key, recent: recentDays })}
+                scroll={false}
+                aria-current={active ? "page" : undefined}
+                className={`-mb-px flex shrink-0 items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors ${
+                  active
+                    ? "border-zinc-900 text-zinc-900 dark:border-zinc-100 dark:text-zinc-100"
+                    : "border-transparent text-zinc-500 hover:border-zinc-300 hover:text-zinc-800 dark:hover:border-zinc-600 dark:hover:text-zinc-200"
+                }`}
+              >
+                {t.label}
+                {tabCounts[t.key] !== undefined && (
+                  <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[11px] tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                    {tabCounts[t.key]!.toLocaleString("en-IN")}
+                  </span>
+                )}
+              </Link>
+            );
+          })}
+        </div>
+      </nav>
+
+      {tab === "overview" && <OverviewTab data={data} link={link} />}
+      {tab === "changes" && <ChangesTab data={data} link={(t, p) => link({ tab: "changes", type: t, page: p, recent: recentDays })} type={type} page={page} total={totalChanges} />}
+      {tab === "pages" && <PagesTab data={data} />}
+      {tab === "checks" && <ChecksTab data={data} />}
+    </div>
+  );
+}
+
+// ---------- Header pieces ----------
+
+function Avatar({ name }: { name: string }) {
+  const initials = name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]!.toUpperCase())
+    .join("");
+  return (
+    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-zinc-100 text-lg font-semibold text-zinc-600 ring-1 ring-inset ring-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:ring-zinc-700">
+      {initials || "?"}
+    </div>
+  );
+}
+
+function StatusPill({ status }: { status: "idle" | "crawling" | "error" }) {
+  const s = {
+    idle: { label: "Monitoring", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-900", dot: "bg-emerald-500" },
+    crawling: { label: "Checking now", cls: "bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-900", dot: "bg-sky-500 animate-pulse" },
+    error: { label: "Check failed", cls: "bg-amber-50 text-amber-800 ring-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-900", dot: "bg-amber-500" },
+  }[status];
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${s.cls}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
+      {s.label}
+    </span>
+  );
+}
+
+/** Compact notice: one readable line, technical details on demand. */
+function Notice({ failed, message }: { failed: boolean; message: string }) {
+  const [headline, ...rest] = message.split(/(?<=\.)\s+|\s+\(/);
+  const hasMore = rest.length > 0 || message.length > 140;
+  return (
+    <div
+      className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-sm ${
+        failed
+          ? "border-amber-200 bg-amber-50/70 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200"
+          : "border-zinc-200 bg-white text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+      }`}
+    >
+      <IconAlert className={`mt-0.5 h-4 w-4 shrink-0 ${failed ? "text-amber-600 dark:text-amber-400" : "text-zinc-400"}`} />
+      <div className="min-w-0 flex-1">
+        <p>
+          <strong className="font-medium">{failed ? "Last check failed. " : "Note from the last check: "}</strong>
+          {headline.slice(0, 140)}
+          {failed && " Use “Check now” to retry."}
+        </p>
+        {hasMore && (
+          <details className="mt-1">
+            <summary className="cursor-pointer select-none text-xs opacity-70 hover:opacity-100">Technical details</summary>
+            <p className="mt-1 break-words font-mono text-xs opacity-80">{message}</p>
+          </details>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function timeUntil(date: Date, now: number): string {
+  const ms = date.getTime() - now;
+  if (ms <= 0) return "due now";
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `in ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  return hours < 24 ? `in ${hours} h` : `in ${Math.round(hours / 24)} d`;
+}
+
+// ---------- Overview ----------
+
+type LinkFn = (p: { tab?: Tab; type?: string; page?: number; recent?: number }) => string;
+
+function OverviewTab({ data, link }: { data: Data; link: LinkFn }) {
+  const { competitor: c, latest, activity, recent, recentDays, topics } = data;
+  const { last7, prev7, counts30 } = activity;
+  const diff = last7 - prev7;
+  const newContent = (counts30.new_page ?? 0) + (counts30.new_blog ?? 0) + (counts30.new_product ?? 0);
+  const byType = CHANGE_ORDER.filter((t) => counts30[t]).map((t) => ({ type: t, n: counts30[t]! }));
+  const maxType = Math.max(1, ...byType.map((t) => t.n));
+
+  return (
+    <div className="space-y-6">
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Pages Monitored" value={c.pagesMonitored} hint={`limit ${c.maxPages} per check`} />
-        <StatCard label="Total Changes" value={totalChanges} />
-        <StatCard label="Last Check" value={timeAgo(c.lastCheckedAt, now)} hint={formatDateTime(c.lastCheckedAt)} />
-        <StatCard
-          label="Discovery"
-          value={latest ? (latest.discoveryMethod === "sitemap" ? "Sitemap" : "Links") : "—"}
+        <KpiCard
+          label="Changes · 7 days"
+          value={last7}
+          icon={<IconActivity />}
+          delta={{ text: `${diff > 0 ? "+" : ""}${diff} vs previous 7 days`, direction: diff > 0 ? "up" : diff < 0 ? "down" : "flat" }}
+        />
+        <KpiCard
+          label="New pages & posts"
+          value={newContent}
+          icon={<IconFile />}
+          hint={`last 30 days · ${counts30.new_blog ?? 0} blogs, ${counts30.new_product ?? 0} products`}
+        />
+        <KpiCard label="Price changes" value={counts30.price_change ?? 0} icon={<IconTag />} hint="last 30 days" />
+        <KpiCard
+          label="Pages tracked"
+          value={c.pagesMonitored}
+          icon={<IconLayers />}
           hint={
             latest
-              ? `robots.txt ${latest.robotsFound ? "found" : "not found"} · ${latest.sitemapUrls.length} sitemap file(s) · ${c.feedUrls?.length ?? 0} RSS feed(s)`
-              : undefined
+              ? `limit ${c.maxPages} · found via ${latest.discoveryMethod === "sitemap" ? "sitemap" : "links"}${c.feedUrls?.length ? ` · ${c.feedUrls.length} RSS` : ""}`
+              : "waiting for the first check"
           }
         />
       </div>
 
-      <RecentUpdates items={recent} days={recentDays} hasSnapshot={!!latest} hrefFor={recentHref} />
-
-      <TopicTrends report={topics} days={recentDays} />
-
-      <Card>
-        <div id="history" className="scroll-mt-6" />
-        <CardHeader title="Change history" />
-        <div className="flex flex-wrap gap-2 border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
-          <FilterChip href={href()} active={!type} label={`All (${totalChanges})`} />
-          {CHANGE_ORDER.filter((t) => countsByType[t]).map((t) => (
-            <FilterChip
-              key={t}
-              href={href(t)}
-              active={type === t}
-              label={`${CHANGE_META[t].icon} ${CHANGE_META[t].plural} (${countsByType[t]})`}
-            />
-          ))}
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card className="self-start lg:col-span-1">
+          <CardHeader title="What they changed · 30 days" />
+          {byType.length === 0 ? (
+            <EmptyState>{latest ? "No changes in the last 30 days." : "Waiting for the first check…"}</EmptyState>
+          ) : (
+            <ul className="space-y-1 p-3">
+              {byType.map(({ type, n }) => (
+                <li key={type}>
+                  <Link
+                    href={link({ tab: "changes", type })}
+                    className="group grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-lg px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                  >
+                    <span aria-hidden className="text-center">{CHANGE_META[type].icon}</span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm">{CHANGE_META[type].plural}</span>
+                      <span className="mt-1 block h-1 rounded-full bg-zinc-100 dark:bg-zinc-800">
+                        <span className="block h-full rounded-full bg-magnitude" style={{ width: `${Math.max(3, (n / maxType) * 100)}%` }} />
+                      </span>
+                    </span>
+                    <span className="text-sm font-semibold tabular-nums text-zinc-700 group-hover:text-zinc-900 dark:text-zinc-300 dark:group-hover:text-zinc-100">
+                      {n}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+        <div className="lg:col-span-2">
+          <TopicTrends report={topics} days={recentDays} />
         </div>
-        {changes.length === 0 && !type ? (
-          <EmptyState>
-            {latest
+      </div>
+
+      <RecentUpdates items={recent} days={recentDays} hasSnapshot={!!latest} hrefFor={(days) => link({ recent: days })} />
+    </div>
+  );
+}
+
+// ---------- Changes ----------
+
+const dayKey = (d: Date) =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: config.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+function ChangesTab({
+  data,
+  link,
+  type,
+  page,
+  total,
+}: {
+  data: Data;
+  link: (type?: string, page?: number) => string;
+  type?: ChangeType;
+  page: number;
+  total: number;
+}) {
+  const { now, changes, countsByType, totalPages, latest } = data;
+  const today = dayKey(new Date(now));
+  const yesterday = dayKey(new Date(now - 86400_000));
+  const groups = new Map<string, typeof changes>();
+  for (const ch of changes) {
+    const key = dayKey(new Date(ch.createdAt));
+    groups.set(key, [...(groups.get(key) ?? []), ch]);
+  }
+  const label = (key: string) =>
+    key === today
+      ? "Today"
+      : key === yesterday
+        ? "Yesterday"
+        : new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "short", timeZone: "UTC" }).format(new Date(`${key}T00:00:00Z`));
+
+  return (
+    <Card>
+      <div className="flex gap-2 overflow-x-auto border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
+        <FilterChip href={link()} active={!type} label={`All ${total.toLocaleString("en-IN")}`} />
+        {CHANGE_ORDER.filter((t) => countsByType[t]).map((t) => (
+          <FilterChip key={t} href={link(t)} active={type === t} label={`${CHANGE_META[t].icon} ${CHANGE_META[t].plural} ${countsByType[t]}`} />
+        ))}
+      </div>
+      {changes.length === 0 ? (
+        <EmptyState>
+          {type
+            ? "No changes of this type."
+            : latest
               ? "No changes detected yet. Changes appear here after the next check is compared with the baseline."
               : "Waiting for the first snapshot…"}
-          </EmptyState>
-        ) : (
-          <ChangeList changes={changes} now={now} />
-        )}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between border-t border-zinc-200 px-5 py-3 text-sm dark:border-zinc-800">
-            {page > 1 ? <Link href={href(type, page - 1)} className="hover:underline">← Newer</Link> : <span />}
-            <span className="text-zinc-500">
-              Page {page} of {totalPages}
+        </EmptyState>
+      ) : (
+        [...groups.entries()].map(([key, items]) => (
+          <section key={key}>
+            <h3 className="border-b border-zinc-100 bg-zinc-50 px-5 py-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/60">
+              {label(key)}
+              <span className="ml-2 font-normal normal-case tracking-normal text-zinc-400">{items.length} on this page</span>
+            </h3>
+            <ChangeList changes={items} now={now} />
+          </section>
+        ))
+      )}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between border-t border-zinc-200 px-5 py-3 text-sm dark:border-zinc-800">
+          {page > 1 ? (
+            <Link href={link(type, page - 1)} className="font-medium hover:underline">
+              ← Newer
+            </Link>
+          ) : (
+            <span />
+          )}
+          <span className="text-zinc-500">
+            Page {page} of {totalPages}
+          </span>
+          {page < totalPages ? (
+            <Link href={link(type, page + 1)} className="font-medium hover:underline">
+              Older →
+            </Link>
+          ) : (
+            <span />
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ---------- Pages ----------
+
+function PagesTab({ data }: { data: Data }) {
+  const { pages, latest } = data;
+  const counts = { blog: 0, product: 0, page: 0 } as Record<string, number>;
+  for (const p of pages) counts[p.pageType] = (counts[p.pageType] ?? 0) + 1;
+  return (
+    <Card>
+      <CardHeader
+        title={latest ? `${pages.length} pages from the latest check` : "Pages"}
+        action={
+          latest ? (
+            <span className="hidden text-xs text-zinc-500 sm:inline">
+              {counts.blog} blogs · {counts.product} products · {counts.page} other · newest first
             </span>
-            {page < totalPages ? <Link href={href(type, page + 1)} className="hover:underline">Older →</Link> : <span />}
-          </div>
-        )}
-      </Card>
-
-      <Card>
-        <CardHeader title="Snapshots" />
-        {snapshots.length === 0 ? (
-          <EmptyState>No snapshots yet.</EmptyState>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs uppercase tracking-wide text-zinc-500">
-                <tr className="border-b border-zinc-200 dark:border-zinc-800">
-                  <th className="px-5 py-2 font-medium">Checked at</th>
-                  <th className="px-3 py-2 font-medium">Result</th>
-                  <th className="px-3 py-2 text-right font-medium">Pages</th>
-                  <th className="px-3 py-2 text-right font-medium">Failed</th>
-                  <th className="px-3 py-2 text-right font-medium">Changes</th>
-                  <th className="px-5 py-2 font-medium">Crawler</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {snapshots.map((s) => (
-                  <tr key={String(s._id)}>
-                    <td className="whitespace-nowrap px-5 py-2.5">{formatDateTime(s.startedAt)}</td>
-                    <td className="px-3 py-2.5">
-                      {s.status === "failed" ? (
-                        <span className="text-rose-600 dark:text-rose-400" title={s.error ?? ""}>
-                          Failed{s.error ? `: ${s.error.slice(0, 80)}` : ""}
-                        </span>
-                      ) : s.isBaseline ? (
-                        "Baseline"
-                      ) : (
-                        "Compared"
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5 text-right tabular-nums">{s.pagesCrawled}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums">{s.pagesFailed}</td>
-                    <td className="px-3 py-2.5 text-right tabular-nums">{s.changesCount}</td>
-                    <td className="px-5 py-2.5 text-zinc-500">
-                      {s.engine} · {s.discoveryMethod}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      <Card>
-        {/* Collapsed by default: the page leads with recent updates and changes. */}
-        <details>
-          <summary className="flex cursor-pointer select-none items-center justify-between gap-4 px-5 py-3 text-sm font-semibold">
-            <span>All monitored pages{latest ? ` (${pages.length})` : ""} · newest first</span>
-            <span className="text-xs font-normal text-zinc-500">from the latest check</span>
-          </summary>
-        {pages.length === 0 ? (
-          <EmptyState>Pages from the latest snapshot will be listed here.</EmptyState>
-        ) : (
-          <div className="max-h-[32rem] overflow-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-white text-left text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900">
-                <tr className="border-b border-zinc-200 dark:border-zinc-800">
-                  <th className="px-5 py-2 font-medium">Page</th>
-                  <th className="px-3 py-2 font-medium">Type</th>
-                  <th className="px-3 py-2 text-right font-medium">Status</th>
-                  <th className="px-3 py-2 text-right font-medium">Words</th>
-                  <th className="whitespace-nowrap px-3 py-2 font-medium">Published</th>
-                  <th className="px-5 py-2 font-medium">Prices</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {pages.map((p) => (
-                  <tr key={String(p._id)} className="align-top">
-                    <td className="max-w-md px-5 py-2">
+          ) : undefined
+        }
+      />
+      {pages.length === 0 ? (
+        <EmptyState>Pages from the latest check will be listed here.</EmptyState>
+      ) : (
+        <div className="max-h-[40rem] overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-1 bg-white text-left text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900">
+              <tr className="border-b border-zinc-200 dark:border-zinc-800">
+                <th className="px-5 py-2 font-medium">Page</th>
+                <th className="px-3 py-2 font-medium">Type</th>
+                <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">Words</th>
+                <th className="whitespace-nowrap px-3 py-2 font-medium">Published</th>
+                <th className="hidden px-5 py-2 font-medium md:table-cell">Prices</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {pages.map((p) => {
+                const broken = p.statusCode >= 400 || p.statusCode === 0;
+                return (
+                  <tr key={String(p._id)} className="align-top hover:bg-zinc-50/70 dark:hover:bg-zinc-800/30">
+                    <td className="max-w-md px-5 py-2.5">
                       <a href={p.url} target="_blank" rel="noreferrer noopener" className="block truncate font-medium hover:underline" title={p.url}>
                         {p.title || displayUrl(p.url)}
                       </a>
-                      <span className="block truncate text-xs text-zinc-500">
-                        {/noindex|\bnone\b/.test(p.robotsMeta ?? "") && (
-                          <span className="mr-1.5 rounded bg-rose-50 px-1 font-medium text-rose-700 dark:bg-rose-950 dark:text-rose-300">
-                            noindex
+                      <span className="flex min-w-0 items-center gap-1.5 text-xs text-zinc-500">
+                        {broken && (
+                          <span className="shrink-0 rounded bg-rose-50 px-1 font-medium text-rose-700 dark:bg-rose-950 dark:text-rose-300" title={p.error ?? ""}>
+                            {p.statusCode || "error"}
                           </span>
                         )}
-                        {displayUrl(p.url)}
+                        {/noindex|\bnone\b/.test(p.robotsMeta ?? "") && (
+                          <span className="shrink-0 rounded bg-amber-50 px-1 font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300">noindex</span>
+                        )}
+                        <span className="truncate">{displayUrl(p.url)}</span>
                       </span>
                     </td>
-                    <td className="px-3 py-2 capitalize text-zinc-600 dark:text-zinc-400">{p.pageType}</td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${p.statusCode >= 400 || p.statusCode === 0 ? "text-rose-600" : ""}`} title={p.error ?? ""}>
-                      {p.statusCode || "ERR"}
+                    <td className="px-3 py-2.5">
+                      <span className="rounded-md bg-zinc-100 px-1.5 py-0.5 text-xs capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                        {p.pageType}
+                      </span>
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{p.wordCount}</td>
-                    <td className="whitespace-nowrap px-3 py-2">
+                    <td className="hidden px-3 py-2.5 text-right tabular-nums sm:table-cell">{p.wordCount.toLocaleString("en-IN")}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5">
                       <PublishedDate published={p.publishedAt} modified={p.modifiedAt ?? p.sitemapLastmod} />
                     </td>
-                    <td className="max-w-xs truncate px-5 py-2 text-zinc-600 dark:text-zinc-400" title={p.prices.join(", ")}>
+                    <td className="hidden max-w-xs truncate px-5 py-2.5 text-zinc-600 md:table-cell dark:text-zinc-400" title={p.prices.join(", ")}>
                       {p.prices.slice(0, 4).join(", ") || "—"}
                     </td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        </details>
-      </Card>
-    </div>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ---------- Check history ----------
+
+function ChecksTab({ data }: { data: Data }) {
+  const { snapshots } = data;
+  const result = (s: Data["snapshots"][number]): { label: string; cls: string } =>
+    s.status === "failed"
+      ? { label: "Failed", cls: "bg-amber-50 text-amber-800 dark:bg-amber-950 dark:text-amber-300" }
+      : s.isBaseline
+        ? { label: "Baseline", cls: "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300" }
+        : { label: "Compared", cls: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" };
+  const duration = (s: Data["snapshots"][number]) => {
+    if (!s.finishedAt) return "—";
+    const sec = Math.round((new Date(s.finishedAt).getTime() - new Date(s.startedAt).getTime()) / 1000);
+    return sec < 60 ? `${sec}s` : `${Math.round(sec / 60)} min`;
+  };
+  return (
+    <Card>
+      <CardHeader title="Check history" action={<span className="text-xs text-zinc-500">last {snapshots.length} checks</span>} />
+      {snapshots.length === 0 ? (
+        <EmptyState>No checks yet.</EmptyState>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs uppercase tracking-wide text-zinc-500">
+              <tr className="border-b border-zinc-200 dark:border-zinc-800">
+                <th className="px-5 py-2 font-medium">When</th>
+                <th className="px-3 py-2 font-medium">Result</th>
+                <th className="px-3 py-2 text-right font-medium">Pages</th>
+                <th className="px-3 py-2 text-right font-medium">Changes</th>
+                <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">Took</th>
+                <th className="hidden px-5 py-2 font-medium md:table-cell">Crawler</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {snapshots.map((s) => {
+                const r = result(s);
+                return (
+                  <tr key={String(s._id)} className="align-top">
+                    <td className="whitespace-nowrap px-5 py-2.5">{formatDateTime(s.startedAt)}</td>
+                    <td className="px-3 py-2.5">
+                      <span className={`rounded-md px-1.5 py-0.5 text-xs font-medium ${r.cls}`}>{r.label}</span>
+                      {s.status === "failed" && s.error && (
+                        <span className="mt-1 block max-w-sm truncate text-xs text-zinc-500" title={s.error}>
+                          {s.error}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">
+                      {s.pagesCrawled}
+                      {s.pagesFailed > 0 && <span className="block text-xs text-zinc-400">{s.pagesFailed} failed</span>}
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">{s.changesCount}</td>
+                    <td className="hidden px-3 py-2.5 text-right tabular-nums text-zinc-500 sm:table-cell">{duration(s)}</td>
+                    <td className="hidden px-5 py-2.5 text-zinc-500 md:table-cell">
+                      {s.engine} · {s.discoveryMethod}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -359,7 +659,7 @@ function RecentUpdates({
                           >
                             {i.kind === "published" ? "Published" : "Updated"}
                           </span>
-                          <span className="tabular-nums">{formatDate(i.at)}</span>
+                          <span className="whitespace-nowrap tabular-nums">{formatDate(i.at)}</span>
                           {i.title && <span className="truncate">{displayUrl(i.url)}</span>}
                         </span>
                       </li>

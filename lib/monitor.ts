@@ -11,8 +11,31 @@ import { notifyBaseline, notifyChanges, notifyFailure } from "./notify";
 const hasContent = (p: { statusCode: number; contentHash?: string }) =>
   p.statusCode > 0 && p.statusCode < 400 && !!p.contentHash;
 
-/** A check still "running" after the crawl time limit + 5 min was killed (restart, hosting timeout). */
-const staleCutoff = () => new Date(Date.now() - config.crawlTimeLimitMs - 5 * 60_000);
+/**
+ * A running check writes a heartbeat; one silent for STALE_MS was killed (restart, hosting timeout).
+ * Not based on the crawl time limit: that differs per host (240s on Vercel, 20 min locally), and a
+ * deployment sharing the database must not fail a slower check still alive on another machine.
+ */
+const HEARTBEAT_MS = 30_000;
+const STALE_MS = 3 * 60_000;
+const staleCutoff = () => new Date(Date.now() - STALE_MS);
+
+// In-process queue: at most MAX_CONCURRENT_CHECKS crawls at once, so many "Check now" clicks
+// don't start a browser each and overload the machine. Shared across hot reloads.
+const slots = globalThis as unknown as { __cmCheckSlots?: { running: number; waiting: (() => void)[] } };
+const queue = (slots.__cmCheckSlots ??= { running: 0, waiting: [] });
+async function acquireSlot(): Promise<void> {
+  if (queue.running < config.maxConcurrentChecks) {
+    queue.running++;
+    return;
+  }
+  await new Promise<void>((resolve) => queue.waiting.push(resolve));
+}
+function releaseSlot() {
+  const next = queue.waiting.shift();
+  if (next) next(); // hand the slot straight to the next check
+  else queue.running = Math.max(0, queue.running - 1);
+}
 
 /** Atomically mark a competitor as crawling. Returns null if a (live) check is already running. */
 async function claim(competitorId: string): Promise<CompetitorDoc | null> {
@@ -40,8 +63,16 @@ export async function startCheck(competitorId: string): Promise<{ run: Promise<v
 /** Old snapshot → new crawl → compare → save changes → notify. Never throws. */
 async function runCheck(competitor: CompetitorDoc): Promise<void> {
   const started = Date.now();
-  const snapshot = await Snapshot.create({ competitorId: competitor._id, status: "running" });
+  const snapshot = await Snapshot.create({ competitorId: competitor._id, status: "running", heartbeatAt: new Date() });
   console.log(`[monitor] checking ${competitor.name} (${competitor.url})`);
+  const heartbeat = setInterval(() => {
+    Snapshot.updateOne({ _id: snapshot._id, status: "running" }, { $set: { heartbeatAt: new Date() } })
+      .exec()
+      .catch(() => {});
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
+  await acquireSlot(); // waits here while other checks run; the heartbeat keeps it "alive"
+  const crawlStarted = Date.now();
 
   try {
     const prev = await Snapshot.findOne({
@@ -151,7 +182,7 @@ async function runCheck(competitor: CompetitorDoc): Promise<void> {
     await pruneOldSnapshots(competitor._id);
     console.log(
       `[monitor] ${competitor.name}: ${okPages.length}/${result.pages.length} pages, ` +
-        `${changes.length} changes, ${((Date.now() - started) / 1000).toFixed(1)}s (${result.engine})`,
+        `${changes.length} changes, ${((Date.now() - crawlStarted) / 1000).toFixed(1)}s crawling, ${((Date.now() - started) / 1000).toFixed(1)}s total (${result.engine})`,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -166,6 +197,9 @@ async function runCheck(competitor: CompetitorDoc): Promise<void> {
       { $set: { status: "error", lastCheckedAt: new Date(), lastError: message } },
     ).catch(() => {});
     await notifyFailure(competitor, snapshot._id, message).catch(() => {});
+  } finally {
+    clearInterval(heartbeat);
+    releaseSlot();
   }
 }
 
@@ -207,18 +241,26 @@ export async function runDueChecks(): Promise<number> {
 /** After a restart, checks that were mid-crawl can never finish; mark them failed. */
 export async function recoverInterruptedChecks(): Promise<void> {
   await connectDB();
-  // Only checks older than the crawl time limit: a fresh one may be running in another
-  // process (e.g. another serverless instance) and must not be failed.
+  // Only checks whose heartbeat stopped: a live one may be running in another process
+  // (another serverless instance, or a local server sharing the database) and must not be failed.
   const cutoff = staleCutoff();
   const message = "Check was interrupted (server restart or hosting time limit). Click Check Now to retry.";
-  const stale = await Snapshot.find({ status: "running", startedAt: { $lt: cutoff } }).select("_id").lean();
+  const stale = await Snapshot.find({
+    status: "running",
+    // Snapshots from older versions have no heartbeat: fall back to their start time.
+    $or: [{ heartbeatAt: { $lt: cutoff } }, { heartbeatAt: null, startedAt: { $lt: cutoff } }],
+  })
+    .select("_id")
+    .lean();
   if (stale.length) {
     const ids = stale.map((s) => s._id);
     await Page.deleteMany({ snapshotId: { $in: ids } });
     await Snapshot.updateMany({ _id: { $in: ids } }, { $set: { status: "failed", finishedAt: new Date(), error: message } });
   }
+  // "Checking…" with no live check behind it (updatedAt guard: the snapshot is created right after the claim).
+  const alive = await Snapshot.distinct("competitorId", { status: "running" });
   await Competitor.updateMany(
-    { status: "crawling", updatedAt: { $lt: cutoff } },
+    { status: "crawling", _id: { $nin: alive }, updatedAt: { $lt: cutoff } },
     { $set: { status: "error", lastError: message } },
   );
 }

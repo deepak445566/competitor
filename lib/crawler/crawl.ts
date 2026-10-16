@@ -12,6 +12,12 @@ const MAX_VERIFY = 25;
 const RECENT_PRIORITY_DAYS = 30;
 /** Responses meaning "slow down" (forbidden by bot protection, rate limited, temporarily unavailable). */
 const BLOCKED_STATUSES = new Set([403, 429, 503]);
+/** Bot protection (e.g. Akamai) often cuts the connection instead of answering 403. */
+const BLOCKED_ERRORS = /ERR_HTTP2_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_EMPTY_RESPONSE|ERR_CONNECTION_CLOSED/;
+const isBlocked = (res: { status: number; error: string | null }) =>
+  BLOCKED_STATUSES.has(res.status) || (res.status === 0 && BLOCKED_ERRORS.test(res.error ?? ""));
+const blockedLabel = (res: { status: number; error: string | null }) =>
+  res.status ? `HTTP ${res.status}` : (res.error?.match(BLOCKED_ERRORS)?.[0] ?? "connection refused");
 /** Pause between pages in slow mode (+ up to 2s random), and before retrying a blocked page. */
 const SLOW_DELAY_MS = 4000;
 const SLOW_RETRY_MS = 8000;
@@ -73,8 +79,10 @@ export async function crawlSite(
 ): Promise<CrawlResult> {
   const home = normalizeUrl(siteUrl)!;
   const rootHost = new URL(home).hostname;
-  const { fetcher, warning } = await createFetcher();
-  const warnings: string[] = warning ? [warning] : [];
+  // Kept as an object: the fetcher may add a warning mid-crawl (e.g. Chromium failed to start).
+  const created = await createFetcher();
+  const fetcher = created.fetcher;
+  const warnings: string[] = [];
   let discovery;
   try {
     discovery = await discover(home, (url) => fetcher.fetchText(url));
@@ -132,20 +140,20 @@ export async function crawlSite(
   let gaveUp = false;
   const crawlOne = async (url: string, followLinks: boolean) => {
     let res = await fetcher.fetchPage(url);
-    if (BLOCKED_STATUSES.has(res.status) && Date.now() < deadline) {
+    if (isBlocked(res) && Date.now() < deadline) {
       if (!slowMode) {
         slowMode = true;
-        warnings.push(`Site limited requests (HTTP ${res.status}); switched to slow mode.`);
-        console.warn(`[crawler] ${rootHost}: HTTP ${res.status}, switching to slow mode`);
+        warnings.push(`Site limited requests (${blockedLabel(res)}); switched to slow mode.`);
+        console.warn(`[crawler] ${rootHost}: ${blockedLabel(res)}, switching to slow mode`);
       }
       await sleep(res.retryAfterMs ?? SLOW_RETRY_MS);
       res = await fetcher.fetchPage(url);
     }
-    blockedInARow = BLOCKED_STATUSES.has(res.status) ? blockedInARow + 1 : 0;
+    blockedInARow = isBlocked(res) ? blockedInARow + 1 : 0;
     if (slowMode && blockedInARow >= MAX_BLOCKED_IN_A_ROW && !gaveUp) {
       gaveUp = true;
       warnings.push(
-        `The site keeps blocking automated access (HTTP ${res.status}), so only the pages that loaded were saved.`,
+        `The site keeps blocking automated access (${blockedLabel(res)}), so only the pages that loaded were saved.`,
       );
       console.warn(`[crawler] ${rootHost}: still blocked in slow mode, stopping early`);
     }
@@ -213,13 +221,22 @@ export async function crawlSite(
       await crawlOne(url, false);
       if (robots.crawlDelayMs) await sleep(robots.crawlDelayMs);
     }
+
+    // Bot protection often holds back the homepage during the first burst of requests: try it once more.
+    const homeAt = pages.findIndex((p) => p.url === home);
+    if (homeAt >= 0 && pages[homeAt].title === undefined && Date.now() < deadline) {
+      const [failed] = pages.splice(homeAt, 1);
+      await sleep(SLOW_RETRY_MS);
+      await crawlOne(home, false);
+      if (pages[pages.length - 1].title === undefined) pages[pages.length - 1] = failed;
+    }
   } finally {
     await fetcher.close();
   }
 
   return {
     engine: fetcher.engine,
-    warning: warnings.join(" ") || null,
+    warning: [created.warning, ...warnings].filter(Boolean).join(" ") || null,
     robotsFound: robots.found,
     sitemapUrls: discovery.sitemapUrls,
     method,

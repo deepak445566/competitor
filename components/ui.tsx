@@ -41,6 +41,46 @@ export function StatCard({ label, value, hint }: { label: string; value: number 
   );
 }
 
+/** Headline metric: label, big value, optional icon, comparison line and footnote. */
+export function KpiCard({
+  label,
+  value,
+  icon,
+  delta,
+  hint,
+}: {
+  label: string;
+  value: number | string;
+  icon?: ReactNode;
+  /** e.g. { text: "+4 vs yesterday", direction: "up" }; neutral colors, since more activity is neither good nor bad. */
+  delta?: { text: string; direction: "up" | "down" | "flat" };
+  hint?: ReactNode;
+}) {
+  const arrow = delta ? { up: "↑", down: "↓", flat: "→" }[delta.direction] : null;
+  return (
+    <Card className="relative overflow-hidden px-5 py-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-sm font-medium text-zinc-500">{label}</div>
+        {icon && (
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+            {icon}
+          </div>
+        )}
+      </div>
+      <div className="mt-1 text-3xl font-semibold tracking-tight">{typeof value === "number" ? value.toLocaleString("en-IN") : value}</div>
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-zinc-500">
+        {delta && (
+          <span className="inline-flex items-center gap-0.5 rounded-md bg-zinc-100 px-1.5 py-0.5 font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+            <span aria-hidden>{arrow}</span>
+            {delta.text}
+          </span>
+        )}
+        {hint}
+      </div>
+    </Card>
+  );
+}
+
 const TONE: Record<string, string> = {
   add: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-900",
   remove: "bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:ring-rose-900",

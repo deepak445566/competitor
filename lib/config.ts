@@ -11,6 +11,8 @@ export const config = {
   adminPassword: process.env.ADMIN_PASSWORD ?? "",
   sessionSecret: process.env.SESSION_SECRET ?? "",
 
+  /** Full checks running at the same time in this server; the rest wait their turn. */
+  maxConcurrentChecks: int(process.env.MAX_CONCURRENT_CHECKS, 2, 1),
   /** Max pages crawled per competitor per check. */
   crawlMaxPages: int(process.env.CRAWL_MAX_PAGES, 50, 1),
   /** Parallel page loads per crawl (forced to 1 when robots.txt sets Crawl-delay). */
@@ -34,6 +36,14 @@ export const config = {
   watchIntervalMinutes: int(process.env.WATCH_INTERVAL_MINUTES, 30),
   /** How many snapshots keep their full page data (older ones keep only metadata). */
   snapshotRetention: int(process.env.SNAPSHOT_RETENTION, 3, 2),
+
+  /**
+   * Every this many days, changes/notifications older than this many days are written to CSV files
+   * in ARCHIVE_DIR and then deleted from MongoDB, so the database doesn't fill up. 0 disables.
+   */
+  retentionDays: int(process.env.RETENTION_DAYS, 7),
+  /** Folder for the CSV archives (relative to the app folder). Must be a lasting disk, not serverless /tmp. */
+  archiveDir: process.env.ARCHIVE_DIR || "archives",
 
   cronSecret: process.env.CRON_SECRET ?? "",
   timeZone: process.env.APP_TIMEZONE ?? "Asia/Kolkata",

@@ -42,3 +42,6 @@ next-env.d.ts
 
 # allow the example env file
 !.env.example
+
+# CSV archives of old data (see RETENTION_DAYS)
+/archives

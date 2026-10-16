@@ -21,10 +21,28 @@ export type ChangeType = (typeof CHANGE_TYPES)[number];
 export type PageType = "page" | "blog" | "product";
 export type DiscoveryMethod = "sitemap" | "links";
 
+// ---------- Group (parent brand, e.g. CourseUnbox, whose competitors are tracked together) ----------
+
+export interface GroupDoc {
+  _id: Types.ObjectId;
+  name: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const groupSchema = new Schema<GroupDoc>(
+  {
+    name: { type: String, required: true, trim: true },
+  },
+  { timestamps: true },
+);
+
 // ---------- Competitor ----------
 
 export interface CompetitorDoc {
   _id: Types.ObjectId;
+  /** Parent group; null on competitors added before groups existed. */
+  groupId?: Types.ObjectId | null;
   name: string;
   url: string;
   host: string;
@@ -44,6 +62,7 @@ export interface CompetitorDoc {
 
 const competitorSchema = new Schema<CompetitorDoc>(
   {
+    groupId: { type: Schema.Types.ObjectId, ref: "Group", index: true },
     name: { type: String, required: true, trim: true },
     url: { type: String, required: true },
     host: { type: String, required: true, index: true },
@@ -70,6 +89,8 @@ export interface SnapshotDoc {
   engine: "playwright" | "fetch";
   startedAt: Date;
   finishedAt?: Date | null;
+  /** Written every 30s while the check runs; a stale one means the process running it died. */
+  heartbeatAt?: Date | null;
   robotsFound: boolean;
   /** Raw robots.txt at check time, to alert on rule changes. Undefined on snapshots from older versions. */
   robotsTxt?: string | null;
@@ -92,6 +113,7 @@ const snapshotSchema = new Schema<SnapshotDoc>({
   engine: { type: String, enum: ["playwright", "fetch"], default: "playwright" },
   startedAt: { type: Date, default: Date.now },
   finishedAt: Date,
+  heartbeatAt: Date,
   robotsFound: { type: Boolean, default: false },
   robotsTxt: String,
   sitemapUrls: { type: [String], default: [] },
@@ -248,6 +270,7 @@ function model<T>(name: string, schema: Schema<T>): Model<T> {
   return mongoose.model<T>(name, schema);
 }
 
+export const Group = model("Group", groupSchema);
 export const Competitor = model("Competitor", competitorSchema);
 export const Snapshot = model("Snapshot", snapshotSchema);
 export const Page = model("Page", pageSchema);
@@ -283,3 +306,38 @@ feedItemSchema.index({ competitorId: 1, key: 1 }, { unique: true });
 feedItemSchema.index({ competitorId: 1, publishedAt: -1 });
 
 export const FeedItem = model("FeedItem", feedItemSchema);
+
+// ---------- Archive (a CSV of old changes moved out of the database) ----------
+
+export interface ArchiveDoc {
+  _id: Types.ObjectId;
+  /** null = competitors without a parent. */
+  groupId?: Types.ObjectId | null;
+  groupName: string;
+  /** File path inside ARCHIVE_DIR. */
+  file: string;
+  /** Readable report (JSON, see lib/report.ts) of the same period, inside ARCHIVE_DIR. */
+  reportFile?: string | null;
+  rows: number;
+  bytes: number;
+  /** Date range of the changes inside. */
+  from: Date;
+  to: Date;
+  createdAt: Date;
+}
+
+const archiveSchema = new Schema<ArchiveDoc>({
+  groupId: { type: Schema.Types.ObjectId, ref: "Group" },
+  groupName: { type: String, required: true },
+  file: { type: String, required: true },
+  reportFile: String,
+  rows: { type: Number, default: 0 },
+  bytes: { type: Number, default: 0 },
+  from: Date,
+  to: Date,
+  createdAt: { type: Date, default: Date.now },
+});
+archiveSchema.index({ groupId: 1, createdAt: -1 });
+archiveSchema.index({ createdAt: -1 });
+
+export const Archive = model("Archive", archiveSchema);

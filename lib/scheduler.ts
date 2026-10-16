@@ -1,4 +1,5 @@
 import "server-only";
+import { archiveUnavailable, runArchive } from "./archive";
 import { config } from "./config";
 import { recoverInterruptedChecks, runDueChecks } from "./monitor";
 import { watchFeeds } from "./feeds";
@@ -51,5 +52,14 @@ export function startScheduler() {
   if (config.watchIntervalMinutes > 0) {
     console.log(`[scheduler] new-upload watch (RSS + sitemap) every ${config.watchIntervalMinutes} min`);
     every("new uploads found", config.watchIntervalMinutes * 60_000, 3 * 60_000, runUploadWatch);
+  }
+
+  const noArchive = archiveUnavailable();
+  if (noArchive) {
+    console.log(`[scheduler] ${noArchive}`);
+  } else {
+    console.log(`[scheduler] every ${config.retentionDays} days, data older than ${config.retentionDays} days moves to CSV in ${config.archiveDir}/`);
+    // Checks hourly whether the next archive is due; the run itself happens once every RETENTION_DAYS days.
+    every("changes archived to CSV", 3600_000, 10 * 60_000, () => runArchive());
   }
 }
