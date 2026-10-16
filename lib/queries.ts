@@ -10,6 +10,7 @@ import { classifyByUrl } from "./crawler/extract";
 import { connectDB } from "./db";
 import { startOfToday } from "./format";
 import { recoverInterruptedChecks } from "./monitor";
+import { describePriceChange } from "./price-diff";
 import {
   Archive,
   CHANGE_TYPES,
@@ -162,10 +163,28 @@ export async function getCompetitors() {
       { $group: { _id: "$competitorId", n: { $sum: 1 } } },
     ]),
     // The latest change worth reading per competitor (new content or a price change).
-    Change.aggregate<{ _id: Types.ObjectId; type: ChangeType; url: string; summary: string; createdAt: Date }>([
+    Change.aggregate<{
+      _id: Types.ObjectId;
+      type: ChangeType;
+      url: string;
+      summary: string;
+      added: string[];
+      removed: string[];
+      createdAt: Date;
+    }>([
       { $match: { type: { $in: HIGHLIGHT_TYPES } } },
       { $sort: { createdAt: -1 } },
-      { $group: { _id: "$competitorId", type: { $first: "$type" }, url: { $first: "$url" }, summary: { $first: "$summary" }, createdAt: { $first: "$createdAt" } } },
+      {
+        $group: {
+          _id: "$competitorId",
+          type: { $first: "$type" },
+          url: { $first: "$url" },
+          summary: { $first: "$summary" },
+          added: { $first: "$added" },
+          removed: { $first: "$removed" },
+          createdAt: { $first: "$createdAt" },
+        },
+      },
     ]),
   ]);
   const weeklyById = new Map(weekly.map((w) => [String(w._id), w.n]));
@@ -189,7 +208,15 @@ export async function getCompetitors() {
       createdAt: c.createdAt.toISOString(),
       lastCheckedAt: c.lastCheckedAt?.toISOString() ?? null,
       nextCheckAt: intervalMs > 0 && c.lastCheckedAt ? new Date(c.lastCheckedAt.getTime() + intervalMs).toISOString() : null,
-      highlight: h ? { type: h.type, url: h.url, summary: h.summary, at: h.createdAt.toISOString() } : null,
+      highlight: h
+        ? {
+            type: h.type,
+            url: h.url,
+            // Price changes saved before "before → after" listed every price on the page.
+            summary: (h.type === "price_change" && describePriceChange(h.removed, h.added)) || h.summary,
+            at: h.createdAt.toISOString(),
+          }
+        : null,
     };
   });
   const groups: GroupRow[] = groupDocs.map((g) => {

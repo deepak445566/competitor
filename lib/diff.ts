@@ -1,6 +1,7 @@
 import type { ChangeType, DiscoveryMethod, PageType } from "./models";
 import { classifyByUrl, normalizePrice } from "./crawler/extract";
 import { formatDate } from "./format";
+import { describePriceChange } from "./price-diff";
 import { siteHost } from "./crawler/url";
 
 /** Fields of a crawled page that the comparison needs (matches PageDoc and CrawledPage). */
@@ -164,7 +165,8 @@ export function detectChanges(prev: CrawlState, curr: CrawlState): ChangeDraft[]
       changes.push({
         type: "price_change",
         url,
-        summary: `${beforePrices.join(", ") || "no price"} → ${(after.prices ?? []).join(", ") || "no price"}`,
+        // Only what moved ("₹24,999 → ₹21,999 (−12%)"), not every price on the page.
+        summary: describePriceChange(prices.removed, prices.added),
         oldValue: beforePrices.join(", "),
         newValue: (after.prices ?? []).join(", "),
         added: prices.added.slice(0, MAX_LIST),

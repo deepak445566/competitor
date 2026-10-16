@@ -1,6 +1,7 @@
 import "server-only";
 import type { Types } from "mongoose";
 import { Change, Competitor, Group, type ChangeType } from "./models";
+import { describePriceChange } from "./price-diff";
 import { brandTokensFor, buildTopicReport, type Term } from "./topics";
 
 // A readable "what did each competitor do" report for one parent and period, built from the change history.
@@ -15,6 +16,8 @@ export interface ReportPrice {
   url: string;
   before: string;
   after: string;
+  /** "₹24,999 → ₹21,999 (−12%), new ₹9,999". Missing in reports archived before it existed. */
+  changes?: string;
   at: string;
 }
 export interface ReportTitle {
@@ -173,6 +176,7 @@ export async function buildReport(
           url: ch.url,
           before: priceList(ch.removed, ch.oldValue),
           after: priceList(ch.added, ch.newValue),
+          changes: describePriceChange(ch.removed, ch.added, 6) || undefined,
           at,
         });
         break;

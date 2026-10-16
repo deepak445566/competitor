@@ -125,8 +125,9 @@ export async function reportToXlsx(report: Report): Promise<Buffer> {
   listSheet(wb, "Price Changes", report, (c) => c.prices, [
     date,
     { header: "Page", width: 55, wrap: true, value: (p) => p.url, link: (p) => p.url },
-    { header: "Prices removed", width: 32, wrap: true, value: (p) => p.before },
-    { header: "Prices added", width: 32, wrap: true, value: (p) => p.after },
+    { header: "Before → after", width: 50, wrap: true, value: (p) => p.changes ?? `${p.before} → ${p.after}` },
+    { header: "Prices removed", width: 28, wrap: true, value: (p) => p.before },
+    { header: "Prices added", width: 28, wrap: true, value: (p) => p.after },
   ]);
   listSheet(wb, "Pages Removed", report, (c) => c.removed, [
     date,

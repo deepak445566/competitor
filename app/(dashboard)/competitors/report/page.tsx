@@ -230,8 +230,7 @@ function CompetitorSection({ c }: { c: CompetitorReport }) {
                   <thead className="text-left text-xs text-zinc-500">
                     <tr>
                       <th className="py-1 pr-3 font-medium">Page</th>
-                      <th className="py-1 pr-3 font-medium">Prices removed</th>
-                      <th className="py-1 pr-3 font-medium">Prices added</th>
+                      <th className="py-1 pr-3 font-medium">Before → after</th>
                       <th className="py-1 font-medium">Date</th>
                     </tr>
                   </thead>
@@ -243,8 +242,7 @@ function CompetitorSection({ c }: { c: CompetitorReport }) {
                             {displayUrl(p.url)}
                           </a>
                         </td>
-                        <td className="py-1.5 pr-3 text-zinc-500 line-through decoration-zinc-300">{p.before}</td>
-                        <td className="py-1.5 pr-3 font-medium">{p.after}</td>
+                        <td className="py-1.5 pr-3 font-medium">{p.changes ?? `${p.before} → ${p.after}`}</td>
                         <td className="whitespace-nowrap py-1.5 text-zinc-500">{formatDate(p.at)}</td>
                       </tr>
                     ))}
