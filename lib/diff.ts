@@ -46,6 +46,21 @@ export interface ChangeDraft {
 const MAX_PER_TYPE = 300;
 const MAX_LIST = 20;
 
+// Counters and clocks that tick on every visit ("1,626 Views", "Comments: 12", "5 min ago") are not
+// edits to the page: lines are compared with the numbers in them masked.
+const COUNTER =
+  /\d[\d,.]*\s*[km]?\+?\s*(views?|likes?|shares?|comments?|reads?|reviews?|ratings?|followers?|subscribers?|votes?|downloads?|learners?|students?|enrolled|enrollments?|bookings?|booked|travell?ers)\b/gi;
+const LABELLED_COUNTER = /\b(views?|likes?|shares?|comments?|reads?)\s*[:\-–]?\s*\d[\d,.]*\s*[km]?\b/gi;
+const RELATIVE_TIME = /\b(\d+|an?|one)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\s+ago\b/gi;
+export const maskVolatile = (line: string) =>
+  line.replace(COUNTER, "# $1").replace(LABELLED_COUNTER, "$1 #").replace(RELATIVE_TIME, "# $2 ago");
+
+/** Lines of `from` with no counterpart in `to`, ignoring counters (keeps the original text for display). */
+function changedLines(from: string[], to: string[]) {
+  const keys = new Set(to.map(maskVolatile));
+  return [...new Set(from.filter((line) => !keys.has(maskVolatile(line))))];
+}
+
 const hasContent = (p: ComparablePage) => p.statusCode > 0 && p.statusCode < 400 && !!p.contentHash;
 /** Identity ignoring protocol and www, used to spot redirects to a different page. */
 const pageKey = (url: string) => {
@@ -175,15 +190,21 @@ export function detectChanges(prev: CrawlState, curr: CrawlState): ChangeDraft[]
     }
 
     if (before.contentHash !== after.contentHash) {
-      const lines = setDiff(before.content?.split("\n"), after.content?.split("\n"));
-      const meaningful = (l: string) => l.split(" ").length >= 3;
-      changes.push({
-        type: "content_change",
-        url,
-        summary: `Word count ${before.wordCount ?? 0} → ${after.wordCount ?? 0}`,
-        added: lines.added.filter(meaningful).slice(0, MAX_LIST).map((l) => truncate(l)),
-        removed: lines.removed.filter(meaningful).slice(0, MAX_LIST).map((l) => truncate(l)),
-      });
+      const beforeLines = before.content?.split("\n") ?? [];
+      const afterLines = after.content?.split("\n") ?? [];
+      const added = changedLines(afterLines, beforeLines);
+      const removed = changedLines(beforeLines, afterLines);
+      // Hash changed only because a view counter or "x min ago" ticked: nothing was edited.
+      if (added.length || removed.length) {
+        const meaningful = (l: string) => l.split(" ").length >= 3;
+        changes.push({
+          type: "content_change",
+          url,
+          summary: `Word count ${before.wordCount ?? 0} → ${after.wordCount ?? 0}`,
+          added: added.filter(meaningful).slice(0, MAX_LIST).map((l) => truncate(l)),
+          removed: removed.filter(meaningful).slice(0, MAX_LIST).map((l) => truncate(l)),
+        });
+      }
     }
 
     changes.push(...seoChanges(before, after));

@@ -268,7 +268,9 @@ export interface CompetitorRow {
 }
 
 export const CHANGES_PAGE_SIZE = 50;
-export const RECENT_WINDOWS = [7, 30, 90] as const;
+export const RECENT_WINDOWS = [1, 7, 30, 90] as const;
+/** Time filters on the Changes tab, in days (none = all time). */
+export const CHANGE_WINDOWS = [1, 7, 30] as const;
 const MAX_RECENT = 300;
 
 export interface RecentUpdate {
@@ -364,7 +366,7 @@ async function getTopicReport(
   );
 }
 
-export async function getCompetitorDetail(id: string, filter: { type?: string; page?: number; recent?: number }) {
+export async function getCompetitorDetail(id: string, filter: { type?: string; page?: number; recent?: number; since?: number }) {
   await ready();
   if (!Types.ObjectId.isValid(id)) return null;
   await recoverInterruptedChecks();
@@ -374,11 +376,14 @@ export async function getCompetitorDetail(id: string, filter: { type?: string; p
 
   const type = CHANGE_TYPES.includes(filter.type as ChangeType) ? (filter.type as ChangeType) : undefined;
   const page = Math.max(1, filter.page ?? 1);
-  const changeQuery = { competitorId: competitor._id, ...(type ? { type } : {}) };
-
   const day = 86400_000;
   const nowMs = Date.now();
-  const [last7, prev7, counts30] = await Promise.all([
+  const since = (CHANGE_WINDOWS as readonly number[]).includes(filter.since ?? 0) ? filter.since : undefined;
+  const sinceMatch = since ? { createdAt: { $gte: new Date(nowMs - since * day) } } : {};
+  const changeQuery = { competitorId: competitor._id, ...sinceMatch, ...(type ? { type } : {}) };
+
+  const [last24h, last7, prev7, counts30] = await Promise.all([
+    Change.countDocuments({ competitorId: competitor._id, createdAt: { $gte: new Date(nowMs - day) } }),
     Change.countDocuments({ competitorId: competitor._id, createdAt: { $gte: new Date(nowMs - 7 * day) } }),
     Change.countDocuments({ competitorId: competitor._id, createdAt: { $gte: new Date(nowMs - 14 * day), $lt: new Date(nowMs - 7 * day) } }),
     countByType({ competitorId: competitor._id, createdAt: { $gte: new Date(nowMs - 30 * day) } }),
@@ -391,7 +396,7 @@ export async function getCompetitorDetail(id: string, filter: { type?: string; p
       .select("-discoveredUrls -lastmods")
       .lean(),
     Snapshot.findOne({ competitorId: competitor._id, status: "running" }).select("-discoveredUrls -lastmods").lean(),
-    countByType({ competitorId: competitor._id }),
+    countByType({ competitorId: competitor._id, ...sinceMatch }),
     Change.countDocuments(changeQuery),
     Change.find(changeQuery)
       .sort({ createdAt: -1, _id: 1 })
@@ -434,7 +439,16 @@ export async function getCompetitorDetail(id: string, filter: { type?: string; p
     recent,
     recentDays,
     topics,
-    activity: { last7, prev7, counts30 },
+    since,
+    activity: {
+      last24h,
+      last7,
+      prev7,
+      counts30,
+      /** Per-type counts for the "What they changed" card: the selected window, 30 days by default. */
+      cardDays: since ?? 30,
+      cardCounts: since && since !== 30 ? await countByType({ competitorId: competitor._id, ...sinceMatch }) : counts30,
+    },
     nextCheckAt:
       config.checkIntervalHours > 0 && competitor.lastCheckedAt
         ? new Date(competitor.lastCheckedAt.getTime() + config.checkIntervalHours * 3600_000)

@@ -10,7 +10,7 @@ import { CHANGE_META, CHANGE_ORDER } from "@/lib/change-meta";
 import { config } from "@/lib/config";
 import { displayUrl, formatDate, formatDateTime, timeAgo } from "@/lib/format";
 import type { ChangeType } from "@/lib/models";
-import { RECENT_WINDOWS, getCompetitorDetail, type RecentUpdate } from "@/lib/queries";
+import { CHANGE_WINDOWS, RECENT_WINDOWS, getCompetitorDetail, type RecentUpdate } from "@/lib/queries";
 import type { Term, TopicReport } from "@/lib/topics";
 
 // Server Actions on this page start checks; on serverless hosts they may run up to this many seconds.
@@ -62,20 +62,22 @@ async function CompetitorDetail({
     type: first(sp.type),
     page: Number(first(sp.page)) || 1,
     recent: Number(first(sp.recent)) || undefined,
+    since: Number(first(sp.since)) || undefined,
   });
   if (!data) notFound();
 
-  const { now, competitor: c, group, running, latest, countsByType, type, page, recentDays, nextCheckAt } = data;
+  const { now, competitor: c, group, running, latest, countsByType, type, page, recentDays, since, nextCheckAt } = data;
   const groupHref = `/competitors?group=${group?.id ?? "none"}`;
   // A change-type filter (e.g. from a dashboard link) opens the Changes tab.
   const requested = first(sp.tab);
   const tab: Tab = TABS.some((t) => t.key === requested) ? (requested as Tab) : type ? "changes" : "overview";
   const totalChanges = Object.values(countsByType).reduce((a, b) => a + (b ?? 0), 0);
 
-  const link = (p: { tab?: Tab; type?: string; page?: number; recent?: number }) => {
+  const link = (p: { tab?: Tab; type?: string; page?: number; recent?: number; since?: number }) => {
     const q = new URLSearchParams();
     if (p.tab && p.tab !== "overview") q.set("tab", p.tab);
     if (p.type) q.set("type", p.type);
+    if (p.since) q.set("since", String(p.since));
     if (p.page && p.page > 1) q.set("page", String(p.page));
     if (p.recent && p.recent !== 30) q.set("recent", String(p.recent));
     const s = q.toString();
@@ -149,7 +151,7 @@ async function CompetitorDetail({
             return (
               <Link
                 key={t.key}
-                href={link({ tab: t.key, recent: recentDays })}
+                href={link({ tab: t.key, recent: recentDays, since })}
                 scroll={false}
                 aria-current={active ? "page" : undefined}
                 className={`-mb-px flex shrink-0 items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors ${
@@ -171,7 +173,16 @@ async function CompetitorDetail({
       </nav>
 
       {tab === "overview" && <OverviewTab data={data} link={link} />}
-      {tab === "changes" && <ChangesTab data={data} link={(t, p) => link({ tab: "changes", type: t, page: p, recent: recentDays })} type={type} page={page} total={totalChanges} />}
+      {tab === "changes" && (
+        <ChangesTab
+          data={data}
+          link={(t, p) => link({ tab: "changes", type: t, page: p, recent: recentDays, since })}
+          sinceHref={(d) => link({ tab: "changes", type, recent: recentDays, since: d })}
+          type={type}
+          page={page}
+          total={totalChanges}
+        />
+      )}
       {tab === "pages" && <PagesTab data={data} />}
       {tab === "checks" && <ChecksTab data={data} />}
     </div>
@@ -249,14 +260,14 @@ function timeUntil(date: Date, now: number): string {
 
 // ---------- Overview ----------
 
-type LinkFn = (p: { tab?: Tab; type?: string; page?: number; recent?: number }) => string;
+type LinkFn = (p: { tab?: Tab; type?: string; page?: number; recent?: number; since?: number }) => string;
 
 function OverviewTab({ data, link }: { data: Data; link: LinkFn }) {
   const { competitor: c, latest, activity, recent, recentDays, topics } = data;
-  const { last7, prev7, counts30 } = activity;
+  const { last7, prev7, counts30, cardDays, cardCounts } = activity;
   const diff = last7 - prev7;
   const newContent = (counts30.new_page ?? 0) + (counts30.new_blog ?? 0) + (counts30.new_product ?? 0);
-  const byType = CHANGE_ORDER.filter((t) => counts30[t]).map((t) => ({ type: t, n: counts30[t]! }));
+  const byType = CHANGE_ORDER.filter((t) => cardCounts[t]).map((t) => ({ type: t, n: cardCounts[t]! }));
   const maxType = Math.max(1, ...byType.map((t) => t.n));
 
   return (
@@ -289,15 +300,24 @@ function OverviewTab({ data, link }: { data: Data; link: LinkFn }) {
 
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="self-start lg:col-span-1">
-          <CardHeader title="What they changed · 30 days" />
+          <CardHeader
+            title={`What they changed · ${cardDays === 1 ? "24 hours" : `${cardDays} days`}`}
+            action={
+              <div className="flex gap-1">
+                {CHANGE_WINDOWS.map((d) => (
+                  <FilterChip key={d} href={link({ recent: data.recentDays, since: d === 30 ? undefined : d })} active={d === cardDays} label={`${d}d`} />
+                ))}
+              </div>
+            }
+          />
           {byType.length === 0 ? (
-            <EmptyState>{latest ? "No changes in the last 30 days." : "Waiting for the first check…"}</EmptyState>
+            <EmptyState>{latest ? `No changes in the ${lastDays(cardDays)}.` : "Waiting for the first check…"}</EmptyState>
           ) : (
             <ul className="space-y-1 p-3">
               {byType.map(({ type, n }) => (
                 <li key={type}>
                   <Link
-                    href={link({ tab: "changes", type })}
+                    href={link({ tab: "changes", type, since: cardDays })}
                     className="group grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-lg px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
                   >
                     <span aria-hidden className="text-center">{CHANGE_META[type].icon}</span>
@@ -321,7 +341,14 @@ function OverviewTab({ data, link }: { data: Data; link: LinkFn }) {
         </div>
       </div>
 
-      <RecentUpdates items={recent} days={recentDays} hasSnapshot={!!latest} hrefFor={(days) => link({ recent: days })} />
+      <RecentUpdates
+        items={recent}
+        days={recentDays}
+        hasSnapshot={!!latest}
+        hrefFor={(days) => link({ recent: days, since: data.since })}
+        changesToday={data.activity.last24h}
+        changesTodayHref={link({ tab: "changes", since: 1 })}
+      />
     </div>
   );
 }
@@ -334,17 +361,19 @@ const dayKey = (d: Date) =>
 function ChangesTab({
   data,
   link,
+  sinceHref,
   type,
   page,
   total,
 }: {
   data: Data;
   link: (type?: string, page?: number) => string;
+  sinceHref: (days?: number) => string;
   type?: ChangeType;
   page: number;
   total: number;
 }) {
-  const { now, changes, countsByType, totalPages, latest } = data;
+  const { now, changes, countsByType, totalPages, latest, since } = data;
   const today = dayKey(new Date(now));
   const yesterday = dayKey(new Date(now - 86400_000));
   const groups = new Map<string, typeof changes>();
@@ -362,6 +391,12 @@ function ChangesTab({
   return (
     <Card>
       <div className="flex gap-2 overflow-x-auto border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
+        {CHANGE_WINDOWS.map((d) => (
+          <FilterChip key={d} href={sinceHref(d)} active={since === d} label={d === 1 ? "Last 24 hours" : `${d} days`} />
+        ))}
+        <FilterChip href={sinceHref()} active={!since} label="All time" />
+      </div>
+      <div className="flex gap-2 overflow-x-auto border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
         <FilterChip href={link()} active={!type} label={`All ${total.toLocaleString("en-IN")}`} />
         {CHANGE_ORDER.filter((t) => countsByType[t]).map((t) => (
           <FilterChip key={t} href={link(t)} active={type === t} label={`${CHANGE_META[t].icon} ${CHANGE_META[t].plural} ${countsByType[t]}`} />
@@ -371,7 +406,9 @@ function ChangesTab({
         <EmptyState>
           {type
             ? "No changes of this type."
-            : latest
+            : since
+              ? `No changes detected in the ${lastDays(since)}.`
+              : latest
               ? "No changes detected yet. Changes appear here after the next check is compared with the baseline."
               : "Waiting for the first snapshot…"}
         </EmptyState>
@@ -595,18 +632,22 @@ function RecentUpdates({
   days,
   hasSnapshot,
   hrefFor,
+  changesToday,
+  changesTodayHref,
 }: {
   items: RecentUpdate[];
   days: number;
   hasSnapshot: boolean;
   hrefFor: (days: number) => string;
+  changesToday: number;
+  changesTodayHref: string;
 }) {
   const groups = RECENT_GROUPS.map((g) => ({ ...g, items: items.filter((i) => i.type === g.type) }));
   return (
     <Card>
       <div id="recent" className="scroll-mt-6" />
       <CardHeader
-        title={`Recent updates — last ${days} days`}
+        title={`Recent updates — ${lastDays(days)}`}
         action={
           <div className="flex gap-1">
             {RECENT_WINDOWS.map((d) => (
@@ -619,7 +660,15 @@ function RecentUpdates({
         <EmptyState>Waiting for the first snapshot…</EmptyState>
       ) : items.length === 0 ? (
         <EmptyState>
-          Nothing published or updated in the last {days} days (based on publish dates and sitemap dates the site exposes).
+          Nothing published or updated in the {lastDays(days)} (based on publish dates and sitemap dates the site exposes).
+          {changesToday > 0 && (
+            <>
+              {" "}
+              <Link href={changesTodayHref} className="font-medium text-zinc-900 underline dark:text-zinc-100">
+                See the {changesToday} change{changesToday === 1 ? "" : "s"} our checks detected in the last 24 hours →
+              </Link>
+            </>
+          )}
         </EmptyState>
       ) : (
         <>
@@ -684,10 +733,10 @@ function TopicTrends({ report, days }: { report: TopicReport; days: number }) {
   return (
     <Card>
       <CardHeader
-        title={`Topic trends — last ${days} days`}
+        title={`Topic trends — ${lastDays(days)}`}
         action={
           <span className="text-xs text-zinc-500">
-            {report.docs} new post/page{report.docs === 1 ? "" : "s"} · previous {days} days: {report.prevDocs}
+            {report.docs} new post/page{report.docs === 1 ? "" : "s"} · previous {days === 1 ? "day" : `${days} days`}: {report.prevDocs}
           </span>
         }
       />
@@ -738,3 +787,5 @@ function TermRow({ label, terms }: { label: string; terms: Term[] }) {
     </div>
   );
 }
+
+const lastDays = (days: number) => (days === 1 ? "last 24 hours" : `last ${days} days`);

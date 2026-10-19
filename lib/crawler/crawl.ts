@@ -2,7 +2,7 @@ import "server-only";
 import { config } from "../config";
 import type { DiscoveryMethod } from "../models";
 import { discover } from "./discovery";
-import { extractPage, parseDate, type ExtractedPage } from "./extract";
+import { classifyByUrl, extractPage, parseDate, type ExtractedPage } from "./extract";
 import { createFetcher } from "./fetcher";
 import { isCrawlableUrl, isSameSite, normalizeUrl } from "./url";
 
@@ -25,6 +25,8 @@ const SLOW_DELAY_MS = 4000;
 const SLOW_RETRY_MS = 8000;
 /** Consecutive blocked pages (after retry) in slow mode before giving up on the site for this check. */
 const MAX_BLOCKED_IN_A_ROW = 3;
+/** Usual blog index paths. Many sites leave the blog out of the sitemap (and even the nav), so probe them. */
+const BLOG_HUB_PATHS = ["/blog", "/blogs", "/news", "/articles", "/insights"];
 
 export interface CrawledPage extends Partial<ExtractedPage> {
   url: string;
@@ -131,9 +133,26 @@ export async function crawlSite(
       queue.push(url);
     }
   };
-  [home, ...fresh, ...recentlyModified, ...prevCrawled, ...byNewest(discovery.pageUrls)].forEach(enqueue);
+  // Blog hubs missing from the sitemap: crawled right after the homepage, and their post links followed.
+  const blogHubs = new Set<string>();
+  if (method === "sitemap") {
+    const origin = new URL(home).origin;
+    for (const path of BLOG_HUB_PATHS) {
+      const hub = normalizeUrl(origin + path);
+      if (!hub || discovered.has(hub) || !robots.isAllowed(hub) || Date.now() > deadline) continue;
+      if (prevDiscovered.has(hub)) {
+        blogHubs.add(hub);
+        continue;
+      }
+      const res = await fetcher.fetchText(hub);
+      if (res?.status === 200 && /<html/i.test(res.body.slice(0, 2000))) blogHubs.add(hub);
+    }
+  }
+
+  [home, ...blogHubs, ...fresh, ...recentlyModified, ...prevCrawled, ...byNewest(discovery.pageUrls)].forEach(enqueue);
 
   const pages: CrawledPage[] = [];
+  let next = 0; // queue position of the next URL to crawl
 
   // Slow mode: the first 403/429/503 means the site is limiting us. From then on crawl one page
   // at a time with a pause (like a person browsing), and retry each blocked page once after a wait.
@@ -178,6 +197,26 @@ export async function crawlSite(
             enqueue(link);
           }
         }
+      } else if ((blogHubs.has(url) && finalUrl !== home) || page.pageType === "blog") {
+        // Sitemap mode: still pick up blog posts the sitemap leaves out, ahead of the rest of the queue.
+        const links = new Set(page.internalLinks ?? []);
+        // Hubs that show one page of posts often list them all in JSON-LD / framework data, not as <a>.
+        if (blogHubs.has(url)) {
+          for (const raw of res.html.match(/https?:\/\/[^\s"'<>\\]+/g) ?? []) {
+            const link = normalizeUrl(raw);
+            if (link && isSameSite(link, rootHost)) links.add(link);
+          }
+        }
+        const posts = [...links].filter((l) => classifyByUrl(l) === "blog");
+        // Only a hub that lists posts counts (sites answering 200 to any path would otherwise add junk).
+        if (blogHubs.has(url) && posts.length > 0) discovered.add(url);
+        for (const link of posts) {
+          if (!queued.has(link) && isCrawlableUrl(link) && robots.isAllowed(link)) {
+            discovered.add(link);
+            queued.add(link);
+            queue.splice(next, 0, link);
+          }
+        }
       }
     }
     pages.push(page);
@@ -188,7 +227,6 @@ export async function crawlSite(
     // Without a sitemap, discover pages by following internal links (breadth-first).
     const followLinks = method === "links";
     const workers = robots.crawlDelayMs > 0 ? 1 : config.crawlConcurrency;
-    let next = 0;
     let started = 0;
     let inFlight = 0;
 
